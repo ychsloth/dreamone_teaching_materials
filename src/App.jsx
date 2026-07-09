@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import {
   Shield, Users, GraduationCap, ChevronDown, ChevronRight, UploadCloud,
   FileText, MessageSquare, Send, AlertTriangle, X, Lock, Boxes, UserCheck,
   ArrowLeft, Box, CheckCircle2, ShieldCheck, ExternalLink, LogOut, Loader2,
-  Clock, Video, FolderOpen, Newspaper
+  Clock, Video, FolderOpen, Newspaper, ImagePlus
 } from 'lucide-react';
 
 const SUPABASE_URL = "https://gpwkuwjonvkfnvupmtkn.supabase.co";
@@ -23,7 +23,36 @@ const STAFF_EMAILS = [
   'bellalin64@gmail.com'
 ];
 
-const LOGO_URL = 'https://drive.google.com/uc?export=view&id=1tux6_zH9cSh2mEwkUHpo-Ezhl0kDbggm';
+// 圖片對照表：方塊名稱 -> Supabase Storage (cube-images bucket) 內的檔名
+const CUBE_IMAGE_MAP = {
+  '1x3x3': 'cube_01.png', '楓葉': 'cube_02.png', '金字塔': 'cube_03.png', '魔錶': 'cube_04.png',
+  '2x2x2': 'cube_05.png', '恐龍': 'cube_06.png', '八葉花': 'cube_07.png', '3x3x3': 'cube_08.png',
+  '2x2x3': 'cube_09.png', '2x3x3': 'cube_10.png', '三階鏡面': 'cube_11.png', '二階鏡面': 'cube_12.png',
+  '二階五魔方': 'cube_13.png', '費雪': 'cube_14.png', '風火輪': 'cube_15.png', '斜轉': 'cube_16.png',
+  '三階齒輪': 'cube_17.png', '4x4x4': 'cube_18.png', '5x5x5': 'cube_19.png', 'FTO': 'cube_20.png',
+  '五魔方': 'cube_21.png', '二階金字塔': 'cube_22.png', '四階金字塔': 'cube_23.png', 'Square-1': 'cube_24.png',
+  '超級楓葉': 'cube_25.psd', '3x3x4': 'cube_26.png', '6x6x6': 'cube_27.png', '7x7x7': 'cube_28.png',
+  '三階粽子': 'cube_29.png', '軸方塊': 'cube_30.png', '三葉草': 'cube_31.png',
+};
+
+const STORAGE_BUCKET = 'cube-images';
+// 直接用已知的 SUPABASE_URL 組出絕對路徑，避免手動貼專案 ID 打錯字
+const STORAGE_BASE_URL = `${SUPABASE_URL}/storage/v1/object/public/${STORAGE_BUCKET}`;
+const LOGO_URL = `${STORAGE_BASE_URL}/logo.png`;
+
+// 依方塊名稱查對照表，找不到或格式不支援(.psd)時回傳 null 並在 console 標明原因
+function getCubeImageUrl(name) {
+  const fileName = CUBE_IMAGE_MAP[name];
+  if (!fileName) {
+    console.warn(`[CUBE_IMAGE_MAP 缺漏] 找不到方塊「${name}」對應的檔名，請檢查 CUBE_IMAGE_MAP 常數。`);
+    return null;
+  }
+  if (fileName.toLowerCase().endsWith('.psd')) {
+    console.warn(`[格式不支援] 方塊「${name}」對應的檔案 ${fileName} 是 .psd，瀏覽器無法直接顯示，已改用替代圖示。`);
+    return null;
+  }
+  return `${STORAGE_BASE_URL}/${fileName}`;
+}
 
 const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&display=swap');`;
 
@@ -34,67 +63,12 @@ const ROLE_META = {
 };
 
 const TIERS = [
-  {
-    score: 10, bg: 'bg-pink-500', text: 'text-white',
-    cubes: [
-      { name: '1x3x3', image: 'https://drive.google.com/uc?export=view&id=1Ai4NCsaZxwkd_MXg4OYpWPopeCscy5Ig' },
-      { name: '楓葉', image: 'https://drive.google.com/uc?export=view&id=1r58L5xbCIDHiST6fCP8XnGXzf5-Raqcq' },
-      { name: '金字塔', image: 'https://drive.google.com/uc?export=view&id=1o3jdNFZCmjE75iwwekEFnXL7KMvUF3HS' },
-      { name: '魔錶', image: 'https://drive.google.com/uc?export=view&id=1scfhAfScmVDIt4Ff-PTFwC9wCzsH7nhM' },
-    ],
-  },
-  {
-    score: 20, bg: 'bg-orange-500', text: 'text-white',
-    cubes: [
-      { name: '2x2x2', image: 'https://drive.google.com/uc?export=view&id=19Mg513eDr91PbMzgjMLF2eA0IXJuVTWG' },
-      { name: '恐龍', image: 'https://drive.google.com/uc?export=view&id=1u9OKsxqCRna7dleHeihuchVYZD5kz1fF' },
-      { name: '八葉花', image: 'https://drive.google.com/uc?export=view&id=1pcHHetT1_4yY-G0ls1w9325HSL6FBiZA' },
-    ],
-  },
-  {
-    score: 30, bg: 'bg-amber-400', text: 'text-slate-900',
-    cubes: [
-      { name: '3x3x3', image: 'https://drive.google.com/uc?export=view&id=1StvxR8xHp0A-6EFwPeJ963gyJiuG8_F6' },
-      { name: '2x2x3', image: 'https://drive.google.com/uc?export=view&id=1Fxdy3FaMbRVCFsRT1090_xwoZU5SC49b' },
-      { name: '2x3x3', image: 'https://drive.google.com/uc?export=view&id=1wWRlk9sktNXVMJ1KusLhBGwAont6uA3e' },
-      { name: '三階鏡面', image: 'https://drive.google.com/uc?export=view&id=1M0CGGZdwEZGsRoB56FgCIY4g-bZFzlFh' },
-      { name: '二階鏡面', image: 'https://drive.google.com/uc?export=view&id=1UtAWtzm1gYeKMosBUqWxF9qthiGTzmCI' },
-      { name: '二階五魔方', image: 'https://drive.google.com/uc?export=view&id=1YrZd8foJOzCp0MOKxY3Tu_StW8L3vbl3' },
-      { name: '費雪', image: 'https://drive.google.com/uc?export=view&id=1wP3Iw6jiNWmzMgIXb5PMbtKhpznyDMCG' },
-      { name: '風火輪', image: 'https://drive.google.com/uc?export=view&id=1BT6xumg5-948F1otJstkh2EH_EhPBNbH' },
-      { name: '斜轉', image: 'https://drive.google.com/uc?export=view&id=1NsPUr9zzdeZP28cd5RVkOKQsvqTzn-aq' },
-      { name: '三階齒輪', image: 'https://drive.google.com/uc?export=view&id=1IPl69zzE-SRzzfSnzq81RZ2HwpIFrLx4' },
-    ],
-  },
-  {
-    score: 50, bg: 'bg-emerald-600', text: 'text-white',
-    cubes: [
-      { name: '4x4x4', image: 'https://drive.google.com/uc?export=view&id=1nJgV_8ktzMbp91uexcDsIiGajUU8jQ2v' },
-      { name: '5x5x5', image: 'https://drive.google.com/uc?export=view&id=16iwhzev71TzP1w2iezn90-SJtWRbKCVH' },
-      { name: 'FTO', image: 'https://drive.google.com/uc?export=view&id=1-uSAGmFQCX8rRfYAvKdsp5yOtzO4Wf7k' },
-      { name: '五魔方', image: 'https://drive.google.com/uc?export=view&id=1oFRip9-CTBvqEk_FJrkAA916FTqg50Hf' },
-      { name: '二階金字塔', image: 'https://drive.google.com/uc?export=view&id=1cD9EDOqNsEh6yGJitFtADEWAQlToMY6x' },
-      { name: '四階金字塔', image: 'https://drive.google.com/uc?export=view&id=1t4-3iNNNbWfcBBZNOBFH_FXT2oPeEc73' },
-    ],
-  },
-  {
-    score: 60, bg: 'bg-orange-900', text: 'text-white',
-    cubes: [
-      { name: 'Square-1', image: 'https://drive.google.com/uc?export=view&id=1Lia-raAw8JJFgzBZ4b-GR-Bc33olFDoA' },
-      { name: '超級楓葉', image: 'https://drive.google.com/uc?export=view&id=1WFlRmdSXTuAkXXpvqsT5m4cQ_PZtK00r' },
-      { name: '3x3x4', image: 'https://drive.google.com/uc?export=view&id=13HGOKjXdVEo0jZJINTh7GnQJ2nLYhpQr' },
-    ],
-  },
-  {
-    score: 70, bg: 'bg-violet-800', text: 'text-white',
-    cubes: [
-      { name: '6x6x6', image: 'https://drive.google.com/uc?export=view&id=1xTdaGWVqcGOdQUh1Lttdl7UYChtmYFOf' },
-      { name: '7x7x7', image: 'https://drive.google.com/uc?export=view&id=1TywgVXAWWXECLUKLGhhE_N38u4tdLE7d' },
-      { name: '三階粽子', image: 'https://drive.google.com/uc?export=view&id=1-nBMWoEa3X-bQE9o-mbFUSHrZ2bJjtrI' },
-      { name: '軸方塊', image: 'https://drive.google.com/uc?export=view&id=11uSThXAR6v_mpMy1m8kRfN8LwxrTS1KB' },
-      { name: '三葉草', image: 'https://drive.google.com/uc?export=view&id=1bsooNk7M6fyzZ5Ahb6e7dbkpx90fDEgY' },
-    ],
-  },
+  { score: 10, bg: 'bg-pink-500', text: 'text-white', cubes: ['1x3x3', '楓葉', '金字塔', '魔錶'] },
+  { score: 20, bg: 'bg-orange-500', text: 'text-white', cubes: ['2x2x2', '恐龍', '八葉花'] },
+  { score: 30, bg: 'bg-amber-400', text: 'text-slate-900', cubes: ['3x3x3', '2x2x3', '2x3x3', '三階鏡面', '二階鏡面', '二階五魔方', '費雪', '風火輪', '斜轉', '三階齒輪'] },
+  { score: 50, bg: 'bg-emerald-600', text: 'text-white', cubes: ['4x4x4', '5x5x5', 'FTO', '五魔方', '二階金字塔', '四階金字塔'] },
+  { score: 60, bg: 'bg-orange-900', text: 'text-white', cubes: ['Square-1', '超級楓葉', '3x3x4'] },
+  { score: 70, bg: 'bg-violet-800', text: 'text-white', cubes: ['6x6x6', '7x7x7', '三階粽子', '軸方塊', '三葉草'] },
 ];
 
 function GoogleIcon() {
@@ -687,6 +661,15 @@ function PendingApprovalScreen({ email, onLogout }) {
   );
 }
 
+function LoadingScreen({ label }) {
+  return (
+    <div className="min-h-screen bg-white flex flex-col items-center justify-center gap-3">
+      <Loader2 className="w-8 h-8 text-orange-500 animate-spin" />
+      <p className="text-sm text-slate-400">{label || '載入中...'}</p>
+    </div>
+  );
+}
+
 export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState('');
@@ -712,6 +695,9 @@ export default function App() {
   const [uploadForm, setUploadForm] = useState({ version_label: '', file_url: '', note: '' });
   const [uploading, setUploading] = useState(false);
 
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const imageInputRef = useRef(null);
+
   const [showReportModal, setShowReportModal] = useState(false);
   const [toast, setToast] = useState(null);
 
@@ -727,19 +713,19 @@ export default function App() {
     else if (STAFF_EMAILS.includes(email)) targetRole = 'internal_partner';
 
     const { data, error } = await supabase.from('profiles').select('*').eq('id', authUser.id).maybeSingle();
-    if (error) console.error('讀取 profile 失敗', error);
+    if (error) console.error('[profiles 讀取失敗]', error.message, error);
 
     if (!data) {
       const role = targetRole || 'general_instructor';
       const status = targetRole ? 'approved' : 'pending';
       const insertResult = await supabase.from('profiles').insert({ id: authUser.id, email, role, status });
-      if (insertResult.error) console.error('建立 profile 失敗', insertResult.error);
+      if (insertResult.error) console.error('[profiles 建立失敗]', insertResult.error.message, insertResult.error);
       return { id: authUser.id, email, role, status };
     }
 
     if (targetRole && (data.role !== targetRole || data.status !== 'approved')) {
       const updateResult = await supabase.from('profiles').update({ role: targetRole, status: 'approved' }).eq('id', authUser.id);
-      if (updateResult.error) console.error('同步權限失敗', updateResult.error);
+      if (updateResult.error) console.error('[profiles 權限同步失敗]', updateResult.error.message, updateResult.error);
       return { ...data, role: targetRole, status: 'approved' };
     }
 
@@ -779,6 +765,7 @@ export default function App() {
       options: { redirectTo: window.location.origin },
     });
     if (error) {
+      console.error('[Google 登入失敗]', error.message, error);
       setAuthError(error.message);
       setAuthLoading(false);
     }
@@ -794,6 +781,7 @@ export default function App() {
   const fetchAllProfiles = useCallback(async () => {
     setAdminLoading(true);
     const { data, error } = await supabase.from('profiles').select('*');
+    if (error) console.error('[讀取所有使用者失敗]', error.message, error);
     if (!error) setAllProfiles(data || []);
     setAdminLoading(false);
   }, []);
@@ -811,6 +799,7 @@ export default function App() {
   const setUserRole = async (user, role) => {
     const { error } = await supabase.from('profiles').update({ role, status: 'approved' }).eq('id', user.id);
     if (error) {
+      console.error('[更新使用者角色失敗]', error.message, error);
       showToast('更新失敗：' + error.message);
       return;
     }
@@ -820,19 +809,19 @@ export default function App() {
 
   const fetchCubeFiles = useCallback(async (cubeName) => {
     const { data, error } = await supabase.from('cube_files').select('*').eq('cube_name', cubeName).order('created_at', { ascending: true });
-    if (error) { console.error('讀取檔案失敗', error); setCubeFiles([]); } else setCubeFiles(data || []);
+    if (error) { console.error('[讀取檔案失敗]', error.message, error); setCubeFiles([]); } else setCubeFiles(data || []);
   }, []);
 
   const fetchCubeComments = useCallback(async (cubeName) => {
     setCommentsLoading(true);
     const { data, error } = await supabase.from('comments').select('*').eq('cube_name', cubeName).order('created_at', { ascending: true });
-    if (error) { console.error('讀取留言失敗', error); setCubeComments([]); } else setCubeComments(data || []);
+    if (error) { console.error('[讀取留言失敗]', error.message, error); setCubeComments([]); } else setCubeComments(data || []);
     setCommentsLoading(false);
   }, []);
 
   const fetchCubeArticle = useCallback(async (cubeName) => {
     const { data, error } = await supabase.from('cube_articles').select('*').eq('cube_name', cubeName).maybeSingle();
-    if (error) { console.error('讀取文章失敗', error); setCubeArticle(null); } else setCubeArticle(data);
+    if (error) { console.error('[讀取文章失敗]', error.message, error); setCubeArticle(null); } else setCubeArticle(data);
   }, []);
 
   useEffect(() => {
@@ -863,6 +852,7 @@ export default function App() {
   }, [view, selectedCube, profile, fetchCubeFiles, fetchCubeComments, fetchCubeArticle]);
 
   const addCubeFile = async (category, form) => {
+    if (!session) { console.error('[新增檔案失敗] 沒有有效的 session，使用者尚未登入'); alert('請先登入'); return; }
     if (!form.version_label.trim() || !form.file_url.trim()) {
       showToast('請填寫名稱與連結');
       return;
@@ -877,7 +867,7 @@ export default function App() {
       uploaded_by: session.user.email,
     });
     setUploading(false);
-    if (error) { showToast('新增失敗：' + error.message); return; }
+    if (error) { console.error('[新增檔案失敗]', error.message, error); showToast('新增失敗：' + error.message); return; }
     showToast('已新增');
     setShowAddFileModal(null);
     setUploadForm({ version_label: '', file_url: '', note: '' });
@@ -888,14 +878,14 @@ export default function App() {
     const { error } = await supabase.from('cube_files').update({
       version_label: form.version_label, file_url: form.file_url, note: form.note, updated_at: new Date().toISOString(),
     }).eq('id', fileId);
-    if (error) { showToast('更新失敗：' + error.message); return; }
+    if (error) { console.error('[更新檔案失敗]', error.message, error); showToast('更新失敗：' + error.message); return; }
     showToast('已更新');
     fetchCubeFiles(selectedCube.name);
   };
 
   const deleteCubeFile = async (fileId) => {
     const { error } = await supabase.from('cube_files').delete().eq('id', fileId);
-    if (error) { showToast('刪除失敗：' + error.message); return; }
+    if (error) { console.error('[刪除檔案失敗]', error.message, error); showToast('刪除失敗：' + error.message); return; }
     showToast('已刪除');
     fetchCubeFiles(selectedCube.name);
   };
@@ -905,7 +895,7 @@ export default function App() {
     const { error } = await supabase.from('comments').insert({
       cube_name: selectedCube.name, user_email: session.user.email, content, is_internal: isInternal,
     });
-    if (error) { showToast('留言送出失敗：' + error.message); return; }
+    if (error) { console.error('[留言送出失敗]', error.message, error); showToast('留言送出失敗：' + error.message); return; }
     fetchCubeComments(selectedCube.name);
   };
 
@@ -914,7 +904,7 @@ export default function App() {
     const { error } = await supabase.from('comments').insert({
       cube_name: selectedCube.name, user_email: session.user.email, content, is_internal: true, file_id: fileId,
     });
-    if (error) { showToast('留言送出失敗：' + error.message); return; }
+    if (error) { console.error('[版本留言送出失敗]', error.message, error); showToast('留言送出失敗：' + error.message); return; }
     fetchCubeComments(selectedCube.name);
   };
 
@@ -923,7 +913,7 @@ export default function App() {
     const { error } = await supabase.from('comments').insert({
       cube_name: selectedCube.name, user_email: session.user.email, content, is_internal: true, article_id: cubeArticle.id,
     });
-    if (error) { showToast('留言送出失敗：' + error.message); return; }
+    if (error) { console.error('[文章留言送出失敗]', error.message, error); showToast('留言送出失敗：' + error.message); return; }
     fetchCubeComments(selectedCube.name);
   };
 
@@ -932,9 +922,47 @@ export default function App() {
       { cube_name: selectedCube.name, content, updated_by: session.user.email, updated_at: new Date().toISOString() },
       { onConflict: 'cube_name' }
     );
-    if (error) { showToast('儲存失敗：' + error.message); return; }
+    if (error) { console.error('[文章儲存失敗]', error.message, error); showToast('儲存失敗：' + error.message); return; }
     showToast('文章已儲存');
     fetchCubeArticle(selectedCube.name);
+  };
+
+  // 直接上傳檔案到 Supabase Storage（例如更換方塊封面圖片），上傳前先確認 session 存在
+  const handleCubeImageUpload = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file || !selectedCube) return;
+
+    if (!session) {
+      console.error('[圖片上傳失敗] 沒有有效的 session，使用者尚未登入');
+      alert('請先登入後再上傳');
+      return;
+    }
+
+    const fileName = CUBE_IMAGE_MAP[selectedCube.name];
+    if (!fileName) {
+      console.error(`[圖片上傳失敗] CUBE_IMAGE_MAP 找不到「${selectedCube.name}」對應的檔名`);
+      alert('這顆方塊尚未在 CUBE_IMAGE_MAP 設定檔名，請先請工程師新增對照');
+      return;
+    }
+
+    setUploadingImage(true);
+    const { data, error } = await supabase.storage.from(STORAGE_BUCKET).upload(fileName, file, { upsert: true });
+    setUploadingImage(false);
+
+    if (error) {
+      console.error('上傳失敗詳細原因:', error.message, 'statusCode:', error.statusCode, error);
+      alert('上傳失敗');
+      return;
+    }
+
+    showToast('圖片已更新，若畫面尚未刷新請重新整理');
+    setBrokenImages((prev) => {
+      const next = { ...prev };
+      delete next[selectedCube.id];
+      delete next[`detail-${selectedCube.id}`];
+      return next;
+    });
   };
 
   const openCube = (cube) => { setSelectedCube(cube); setView('cube'); };
@@ -947,12 +975,9 @@ export default function App() {
     setCubeArticle(null);
   };
 
+  // ---- 防呆守門：任何一個必要狀態尚未就緒時，一律顯示載入畫面，絕不直接渲染主畫面 ----
   if (authLoading && !session) {
-    return (
-      <div className="min-h-screen bg-white flex items-center justify-center">
-        <Loader2 className="w-8 h-8 text-orange-500 animate-spin" />
-      </div>
-    );
+    return <LoadingScreen label="連線中..." />;
   }
 
   if (!session) {
@@ -960,11 +985,7 @@ export default function App() {
   }
 
   if (!profile) {
-    return (
-      <div className="min-h-screen bg-white flex items-center justify-center">
-        <Loader2 className="w-8 h-8 text-orange-500 animate-spin" />
-      </div>
-    );
+    return <LoadingScreen label="讀取使用者權限中..." />;
   }
 
   if (profile.status !== 'approved') {
@@ -972,6 +993,16 @@ export default function App() {
   }
 
   const role = profile.role;
+  if (!role || !ROLE_META[role]) {
+    console.error(`[角色錯誤] profile.role 的值「${role}」不在 ROLE_META 定義的角色中`);
+    return <LoadingScreen label="角色設定異常，請聯繫總監..." />;
+  }
+
+  if (!CUBE_IMAGE_MAP || Object.keys(CUBE_IMAGE_MAP).length === 0) {
+    console.error('[CUBE_IMAGE_MAP 錯誤] 圖片對照表是空的，請檢查常數設定');
+    return <LoadingScreen label="載入圖片對照表中..." />;
+  }
+
   const roleMeta = ROLE_META[role];
   const canManageFiles = role === 'admin' || role === 'internal_partner';
 
@@ -986,6 +1017,8 @@ export default function App() {
 
   const commentAuthorMap = (rows) => rows.map((r) => ({ id: r.id, author: r.user_email, text: r.content, time: r.created_at }));
 
+  const detailImageUrl = selectedCube ? getCubeImageUrl(selectedCube.name) : null;
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800" style={{ fontFamily: "'Inter', sans-serif" }}>
       <style>{FONT_IMPORT}</style>
@@ -994,7 +1027,15 @@ export default function App() {
         <div className="max-w-7xl mx-auto px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
           <div className="flex items-center gap-3">
             {!logoError ? (
-              <img src={LOGO_URL} alt="夢想一號" className="w-9 h-9 rounded-lg object-cover shrink-0" onError={() => setLogoError(true)} />
+              <img
+                src={LOGO_URL}
+                alt="夢想一號"
+                className="w-9 h-9 rounded-lg object-cover shrink-0"
+                onError={() => {
+                  console.warn(`[LOGO 載入失敗] 無法讀取 ${LOGO_URL}，請確認 Storage bucket 內有 logo.png`);
+                  setLogoError(true);
+                }}
+              />
             ) : (
               <div className="w-9 h-9 rounded-lg bg-orange-500 flex items-center justify-center shrink-0">
                 <Boxes className="w-5 h-5 text-white" />
@@ -1058,8 +1099,9 @@ export default function App() {
                     </button>
                     {isOpen && (
                       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 p-5 pt-0">
-                        {tier.cubes.map((c) => {
-                          const cube = { id: `${tier.score}__${c.name}`, name: c.name, image: c.image, tier };
+                        {tier.cubes.map((name) => {
+                          const cube = { id: `${tier.score}__${name}`, name, tier };
+                          const imgUrl = getCubeImageUrl(name);
                           return (
                             <button
                               key={cube.id}
@@ -1067,12 +1109,15 @@ export default function App() {
                               className="group bg-white hover:shadow-md border border-slate-200 hover:border-orange-400 rounded-xl overflow-hidden flex flex-col transition text-left"
                             >
                               <div className="aspect-square bg-slate-50 overflow-hidden flex items-center justify-center">
-                                {!brokenImages[cube.id] ? (
+                                {imgUrl && !brokenImages[cube.id] ? (
                                   <img
-                                    src={cube.image}
+                                    src={imgUrl}
                                     alt={cube.name}
                                     className="w-full h-full object-cover group-hover:scale-105 transition"
-                                    onError={() => setBrokenImages((prev) => ({ ...prev, [cube.id]: true }))}
+                                    onError={() => {
+                                      console.warn(`[圖片載入失敗] 方塊「${cube.name}」讀取失敗：${imgUrl}`);
+                                      setBrokenImages((prev) => ({ ...prev, [cube.id]: true }));
+                                    }}
                                   />
                                 ) : (
                                   <Box className="w-8 h-8 text-slate-300" />
@@ -1108,12 +1153,15 @@ export default function App() {
             <div className="flex items-center justify-between flex-wrap gap-4 bg-white border border-slate-200 rounded-2xl p-6 mb-6 shadow-sm">
               <div className="flex items-center gap-4">
                 <div className={`w-14 h-14 rounded-xl overflow-hidden ${selectedCube.tier.bg} ${selectedCube.tier.text} flex items-center justify-center shrink-0`}>
-                  {!brokenImages[`detail-${selectedCube.id}`] && selectedCube.image ? (
+                  {detailImageUrl && !brokenImages[`detail-${selectedCube.id}`] ? (
                     <img
-                      src={selectedCube.image}
+                      src={detailImageUrl}
                       alt={selectedCube.name}
                       className="w-full h-full object-cover"
-                      onError={() => setBrokenImages((prev) => ({ ...prev, [`detail-${selectedCube.id}`]: true }))}
+                      onError={() => {
+                        console.warn(`[圖片載入失敗] 方塊詳情頁「${selectedCube.name}」讀取失敗：${detailImageUrl}`);
+                        setBrokenImages((prev) => ({ ...prev, [`detail-${selectedCube.id}`]: true }));
+                      }}
                     />
                   ) : (
                     <Box className="w-7 h-7" />
@@ -1124,14 +1172,28 @@ export default function App() {
                   <p className="text-xs text-slate-400">認證分數 {selectedCube.tier.score} 分・{selectedCube.tier.score}分方塊區</p>
                 </div>
               </div>
-              {role === 'general_instructor' && (
-                <button
-                  onClick={() => setShowReportModal(true)}
-                  className="flex items-center gap-1.5 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium px-4 py-2.5 rounded-xl transition"
-                >
-                  <AlertTriangle className="w-4 h-4" /> 勘誤與建議回報
-                </button>
-              )}
+              <div className="flex items-center gap-2">
+                {role === 'admin' && (
+                  <>
+                    <input type="file" accept="image/*" ref={imageInputRef} className="hidden" onChange={handleCubeImageUpload} />
+                    <button
+                      onClick={() => imageInputRef.current && imageInputRef.current.click()}
+                      disabled={uploadingImage}
+                      className="flex items-center gap-1.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 text-sm font-medium px-4 py-2.5 rounded-xl transition disabled:opacity-50"
+                    >
+                      <ImagePlus className="w-4 h-4" /> {uploadingImage ? '上傳中...' : '更換方塊圖片'}
+                    </button>
+                  </>
+                )}
+                {role === 'general_instructor' && (
+                  <button
+                    onClick={() => setShowReportModal(true)}
+                    className="flex items-center gap-1.5 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium px-4 py-2.5 rounded-xl transition"
+                  >
+                    <AlertTriangle className="w-4 h-4" /> 勘誤與建議回報
+                  </button>
+                )}
+              </div>
             </div>
 
             {(role === 'admin' || role === 'internal_partner') && (
@@ -1261,3 +1323,4 @@ export default function App() {
     </div>
   );
 }
+ 
