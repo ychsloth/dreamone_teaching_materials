@@ -5,7 +5,7 @@ import {
   Shield, Users, GraduationCap, ChevronDown, ChevronRight, ChevronLeft, UploadCloud,
   FileText, MessageSquare, Send, AlertTriangle, X, Lock, Boxes, UserCheck,
   ArrowLeft, Box, CheckCircle2, ShieldCheck, ExternalLink, LogOut, Loader2,
-  Clock, Video, FolderOpen, Newspaper, ImagePlus, Camera, LayoutDashboard, Sun, Moon, Bell, ClipboardList
+  Clock, Video, FolderOpen, Newspaper, ImagePlus, Camera, LayoutDashboard, Sun, Moon, Bell, ClipboardList, Palette
 } from 'lucide-react';
 
 // react-pdf 需要一個獨立的 worker 檔案才能解析 PDF，這裡用 CDN 版本，版本號要跟 react-pdf 內附的 pdfjs-dist 對上
@@ -218,7 +218,11 @@ const ROLE_META = {
   admin: { label: 'Admin・總管理者', icon: Shield },
   internal_partner: { label: 'Internal・內部夥伴', icon: Users },
   general_instructor: { label: 'Instructor・外部講師', icon: GraduationCap },
+  designer: { label: 'Designer・設計師', icon: Palette },
 };
+
+// 排程任務的類型標籤，跟 design_tasks 資料表的 task_type 欄位對應
+const DESIGN_TASK_TYPE_LABEL = { revise: '修改內容', new: '新講義製作', other: '其他' };
 
 const TIERS = [
   { score: '啟蒙系列', badge: '🌱', label: '啟蒙系列', bg: 'bg-teal-400', text: 'text-slate-900', cubes: ['布丁', '三明治', '凹凸', '火山', '二重奏', '1x2x3', '小寶塔'] },
@@ -1359,6 +1363,189 @@ function AssignTaskModal({ cubeOptions, internalUsers, onClose, onSubmit, resolv
   );
 }
 
+// 設計師排程清單頁：admin 在這裡指派「要修改的內容／要製作的新講義」，設計師登入後只看到指派給自己的項目
+function ScheduleView({ role, currentUserEmail, tasks, onOpenCreate, onMarkDone, onDelete, resolveAuthorName }) {
+  const [filter, setFilter] = useState('pending');
+
+  const visibleTasks = role === 'designer' ? tasks.filter((t) => t.assigned_to === currentUserEmail) : tasks;
+  const filtered = visibleTasks
+    .filter((t) => (filter === 'all' ? true : filter === 'pending' ? t.status !== 'done' : t.status === 'done'))
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+  return (
+    <div>
+      <div className="flex items-center justify-between flex-wrap gap-3 mb-1">
+        <h1 style={{ fontFamily: "'Orbitron', sans-serif" }} className="text-3xl font-black text-[var(--fg)] uppercase tracking-widest">
+          排程清單
+        </h1>
+        {role === 'admin' && (
+          <button
+            onClick={onOpenCreate}
+            className="flex items-center gap-1.5 border-2 border-[#00ff88] text-[var(--accentText)] bg-transparent text-base font-mono uppercase tracking-wider px-4 py-2.5 cyber-chamfer hover:bg-[#00ff88] hover:text-[#0a0a0f] transition"
+          >
+            <ClipboardList className="w-4 h-4" /> 新增排程項目
+          </button>
+        )}
+      </div>
+      <p className="text-[var(--mutedFg)] text-base mb-6">
+        {role === 'admin' ? '指派給設計師的修改與製作項目' : '樹懶老師指派給你的修改與製作項目'}
+      </p>
+
+      <div className="flex gap-2 mb-6">
+        {[['pending', '待處理'], ['done', '已完成'], ['all', '全部']].map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => setFilter(key)}
+            className={`text-sm font-mono uppercase tracking-wider px-3 py-1.5 cyber-chamfer-sm border transition ${
+              filter === key ? 'border-[#00ff88] text-[var(--accentText)] bg-[#00ff88]/10' : 'border-[var(--border)] text-[var(--mutedFg)] hover:text-[var(--fg)]'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {filtered.length === 0 && <p className="text-base text-[var(--mutedFg)] py-8 text-center">目前沒有項目</p>}
+
+      <div className="space-y-3">
+        {filtered.map((t) => (
+          <div key={t.id} className={`bg-[var(--card)] border cyber-chamfer p-5 ${t.status === 'done' ? 'border-[var(--border)] opacity-60' : 'border-[var(--border)]'}`}>
+            <div className="flex items-start justify-between gap-3 flex-wrap">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap mb-1">
+                  <span className="text-sm font-mono uppercase tracking-wider px-2 py-0.5 cyber-chamfer-sm border border-[#00d4ff]/50 text-[var(--cyanText)]">
+                    {DESIGN_TASK_TYPE_LABEL[t.task_type] || '其他'}
+                  </span>
+                  {t.status === 'done' && (
+                    <span className="text-sm font-mono uppercase tracking-wider px-2 py-0.5 cyber-chamfer-sm border border-[#00ff88]/50 text-[var(--accentText)]">已完成</span>
+                  )}
+                </div>
+                <h3 className="text-lg font-semibold text-[var(--fg)]">{t.title}</h3>
+                {t.description && <p className="text-base text-[var(--fg)] mt-1 whitespace-pre-wrap break-words">{t.description}</p>}
+                <p className="text-sm text-[var(--mutedFg)] mt-2">
+                  {role === 'admin' ? `指派給：${resolveAuthorName(t.assigned_to)}・` : `指派人：${resolveAuthorName(t.assigned_by)}・`}
+                  {t.due_date ? `期限 ${t.due_date}・` : ''}
+                  {formatTime(t.created_at)}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {role === 'designer' && t.status !== 'done' && (
+                  <button
+                    onClick={() => onMarkDone(t.id)}
+                    className="text-sm font-mono uppercase tracking-wider border border-[#00ff88] text-[var(--accentText)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:bg-[#00ff88] hover:text-[#0a0a0f] transition"
+                  >
+                    標記完成
+                  </button>
+                )}
+                {role === 'admin' && (
+                  <button
+                    onClick={() => onDelete(t.id)}
+                    className="text-sm font-mono uppercase tracking-wider border border-[var(--dangerText)]/60 text-[var(--dangerText)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:bg-[var(--dangerText)] hover:text-[#0a0a0f] transition"
+                  >
+                    刪除
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// 指派排程項目給設計師（admin 專用）
+function DesignTaskModal({ designers, onClose, onSubmit }) {
+  const [form, setForm] = useState({ title: '', description: '', task_type: 'revise', assigned_to: designers[0] ? designers[0].email : '', due_date: '' });
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async () => {
+    if (!form.title.trim() || !form.assigned_to) return;
+    setSubmitting(true);
+    await onSubmit(form);
+    setSubmitting(false);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[260] p-4" onClick={onClose}>
+      <div className="bg-[var(--card)] border border-[var(--border)] cyber-chamfer w-full max-w-md p-6 shadow-[0_0_30px_rgba(0,255,136,0.15)]" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-semibold text-xl flex items-center gap-2 text-[var(--fg)] uppercase tracking-wide font-mono">
+            <ClipboardList className="w-5 h-5 text-[var(--accentText)]" /> 新增排程項目
+          </h3>
+          <button onClick={onClose}>
+            <X className="w-5 h-5 text-[var(--mutedFg)] hover:text-[var(--accentText)]" />
+          </button>
+        </div>
+        {designers.length === 0 ? (
+          <p className="text-base text-[var(--mutedFg)]">目前還沒有設計師帳號，請先到權限管理後台把使用者設為「設計師」。</p>
+        ) : (
+          <div className="space-y-3">
+            <div>
+              <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">標題</label>
+              <input
+                type="text"
+                value={form.title}
+                onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
+                placeholder="例如：3x3x3 美編講義第3頁錯字"
+                className="w-full bg-[var(--muted)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)]"
+              />
+            </div>
+            <div>
+              <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">類型</label>
+              <select
+                value={form.task_type}
+                onChange={(e) => setForm((f) => ({ ...f, task_type: e.target.value }))}
+                className="w-full bg-[var(--muted)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)]"
+              >
+                <option value="revise">修改內容</option>
+                <option value="new">新講義製作</option>
+                <option value="other">其他</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">指派給</label>
+              <select
+                value={form.assigned_to}
+                onChange={(e) => setForm((f) => ({ ...f, assigned_to: e.target.value }))}
+                className="w-full bg-[var(--muted)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)]"
+              >
+                {designers.map((d) => <option key={d.id} value={d.email}>{d.nickname || d.email}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">期限（選填）</label>
+              <input
+                type="date"
+                value={form.due_date}
+                onChange={(e) => setForm((f) => ({ ...f, due_date: e.target.value }))}
+                className="w-full bg-[var(--muted)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)]"
+              />
+            </div>
+            <div>
+              <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">詳細說明（選填）</label>
+              <textarea
+                value={form.description}
+                onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+                rows={4}
+                placeholder="要修改什麼、新講義的內容範圍..."
+                className="w-full bg-[var(--muted)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)]"
+              />
+            </div>
+            <button
+              onClick={submit}
+              disabled={submitting || !form.title.trim() || !form.assigned_to}
+              className="w-full border-2 border-[#00ff88] text-[var(--accentText)] bg-transparent cyber-chamfer-sm font-mono uppercase tracking-wider py-2.5 disabled:opacity-40 hover:bg-[#00ff88] hover:text-[#0a0a0f] transition"
+            >
+              {submitting ? '指派中...' : '送出指派'}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AdminDrawer({ allUsers, onSetRole, onClose, loading }) {
   const pending = allUsers.filter((u) => u.status && u.status !== 'approved');
   return (
@@ -1387,6 +1574,7 @@ function AdminDrawer({ allUsers, onSetRole, onClose, loading }) {
                   <div className="flex flex-wrap gap-2">
                     <button onClick={() => onSetRole(u, 'general_instructor')} className="text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition">設為一般講師</button>
                     <button onClick={() => onSetRole(u, 'internal_partner')} className="text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition">設為內部夥伴</button>
+                    <button onClick={() => onSetRole(u, 'designer')} className="text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition">設為設計師</button>
                     <button onClick={() => onSetRole(u, 'admin')} className="text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition">設為管理者</button>
                   </div>
                 </div>
@@ -1415,6 +1603,7 @@ function AdminDrawer({ allUsers, onSetRole, onClose, loading }) {
               >
                 <option value="general_instructor">一般講師</option>
                 <option value="internal_partner">內部夥伴</option>
+                <option value="designer">設計師</option>
                 <option value="admin">管理者</option>
               </select>
             </div>
@@ -1926,7 +2115,7 @@ function ProfileSetup({ mode, initialNickname, initialAvatarUrl, onSave, onCance
 }
 
 // Header：登入後常駐頂列，顯示頭貼＋暱稱，點擊進入 /profile 編輯頁
-function Header({ profile, session, role, onOpenAdmin, onOpenProfile, onLogout, logoError, onLogoError, onGoHome, hasUnseenActivity, onOpenNotif, onOpenAssign, onOpenInternalDocs }) {
+function Header({ profile, session, role, onOpenAdmin, onOpenProfile, onLogout, logoError, onLogoError, onGoHome, hasUnseenActivity, onOpenNotif, onOpenAssign, onOpenInternalDocs, onOpenSchedule, hasPendingDesignTasks }) {
   const roleMeta = role ? ROLE_META[role] : null;
   return (
     <div className="sticky top-0 z-40 bg-[var(--bg)]/95 backdrop-blur border-b border-[#00ff88]/40 shadow-[0_1px_10px_rgba(0,255,136,0.25)]">
@@ -1992,6 +2181,17 @@ function Header({ profile, session, role, onOpenAdmin, onOpenProfile, onLogout, 
               <ClipboardList className="w-3.5 h-3.5" /> 指派任務
             </button>
           )}
+          {(role === 'admin' || role === 'designer') && (
+            <button
+              onClick={onOpenSchedule}
+              className="relative flex items-center gap-1.5 text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
+            >
+              <ClipboardList className="w-3.5 h-3.5" /> 排程清單
+              {hasPendingDesignTasks && (
+                <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-[#ff3366] shadow-[0_0_5px_#ff3366]" />
+              )}
+            </button>
+          )}
           {role === 'admin' && (
             <button
               onClick={onOpenAdmin}
@@ -2043,6 +2243,8 @@ export default function App() {
   const [recentComments, setRecentComments] = useState([]);
   const [showNotifPanel, setShowNotifPanel] = useState(false);
   const [showAssignModal, setShowAssignModal] = useState(false);
+  const [designTasks, setDesignTasks] = useState([]);
+  const [showDesignTaskModal, setShowDesignTaskModal] = useState(false);
   const [internalDocs, setInternalDocs] = useState([]);
   const [internalDocComments, setInternalDocComments] = useState([]);
   const [showInternalDocsPanel, setShowInternalDocsPanel] = useState(false);
@@ -2339,6 +2541,40 @@ export default function App() {
     fetchTasks();
   };
 
+  // ---- 排程清單：admin 指派「要修改的內容／要製作的新講義」給設計師，設計師登入後只看到指派給自己的項目 ----
+  const fetchDesignTasks = useCallback(async () => {
+    const { data, error } = await supabase.from('design_tasks').select('*').order('created_at', { ascending: false });
+    if (error) { console.error('[讀取排程任務失敗]', error.message, error); return; }
+    setDesignTasks(data || []);
+  }, []);
+
+  const createDesignTask = async (form) => {
+    const { error } = await supabase.from('design_tasks').insert({
+      title: form.title,
+      description: form.description || null,
+      task_type: form.task_type,
+      assigned_to: form.assigned_to,
+      assigned_by: session.user.email,
+      due_date: form.due_date || null,
+    });
+    if (error) { console.error('[新增排程任務失敗]', error.message, error); showToast('新增失敗：' + error.message); return; }
+    showToast('已新增排程項目');
+    setShowDesignTaskModal(false);
+    fetchDesignTasks();
+  };
+
+  const markDesignTaskDone = async (taskId) => {
+    const { error } = await supabase.from('design_tasks').update({ status: 'done' }).eq('id', taskId);
+    if (error) { console.error('[更新排程任務狀態失敗]', error.message, error); showToast('更新失敗：' + error.message); return; }
+    fetchDesignTasks();
+  };
+
+  const deleteDesignTask = async (taskId) => {
+    const { error } = await supabase.from('design_tasks').delete().eq('id', taskId);
+    if (error) { console.error('[刪除排程任務失敗]', error.message, error); showToast('刪除失敗：' + error.message); return; }
+    fetchDesignTasks();
+  };
+
   // ---- 內部其他文件校稿區：不綁定特定方塊，admin／內部夥伴專用 ----
   const fetchInternalDocs = useCallback(async () => {
     const { data, error } = await supabase.from('internal_docs').select('*').order('created_at', { ascending: false });
@@ -2472,7 +2708,10 @@ export default function App() {
       fetchTasks();
       if (role === 'admin') fetchRecentComments();
     }
-  }, [profile, fetchProfileDirectory, fetchAllCubeStatus, fetchTasks, fetchRecentComments]);
+    if (role === 'admin' || role === 'designer') {
+      fetchDesignTasks();
+    }
+  }, [profile, fetchProfileDirectory, fetchAllCubeStatus, fetchTasks, fetchRecentComments, fetchDesignTasks]);
 
   const fetchDraftFiles = useCallback(async (cubeName) => {
     const { data, error } = await supabase.from('cube_drafts').select('*').eq('cube_name', cubeName).order('created_at', { ascending: true });
@@ -2752,6 +2991,13 @@ export default function App() {
     : role === 'internal_partner'
       ? tasks.some((t) => t.assigned_to === session.user.email && t.status !== 'done')
       : false;
+  const hasPendingDesignTasks = role === 'designer'
+    ? designTasks.some((t) => t.assigned_to === session.user.email && t.status !== 'done')
+    : role === 'admin'
+      ? designTasks.some((t) => t.status !== 'done')
+      : false;
+  // 設計師沒有方塊瀏覽的權限，一律導向排程清單頁
+  const effectiveView = role === 'designer' && (view === 'dashboard' || view === 'cube') ? 'schedule' : view;
   if (!role || !ROLE_META[role]) {
     console.error(`[角色錯誤] profile.role 的值「${role}」不在 ROLE_META 定義的角色中`);
     return <LoadingScreen label="角色設定異常，請聯繫總監..." />;
@@ -2800,6 +3046,8 @@ export default function App() {
           onOpenNotif={() => { setShowNotifPanel(true); if (role === 'admin') markNotificationsSeen(); }}
           onOpenAssign={() => { fetchAllProfiles(); setShowAssignModal(true); }}
           onOpenInternalDocs={() => { fetchInternalDocs(); fetchInternalDocComments(); setShowInternalDocsPanel(true); }}
+          onOpenSchedule={() => { setView('schedule'); fetchDesignTasks(); if (role === 'admin') fetchAllProfiles(); }}
+          hasPendingDesignTasks={hasPendingDesignTasks}
         />
         <ProfileSetup
           mode="edit"
@@ -2839,7 +3087,19 @@ export default function App() {
       />
 
       <main className="max-w-7xl mx-auto px-6 py-8">
-        {view === 'dashboard' && (
+        {effectiveView === 'schedule' && (
+          <ScheduleView
+            role={role}
+            currentUserEmail={session.user.email}
+            tasks={designTasks}
+            onOpenCreate={() => { fetchAllProfiles(); setShowDesignTaskModal(true); }}
+            onMarkDone={markDesignTaskDone}
+            onDelete={deleteDesignTask}
+            resolveAuthorName={resolveAuthorName}
+          />
+        )}
+
+        {effectiveView === 'dashboard' && (
           <div>
             <div className="flex items-center justify-between flex-wrap gap-3 mb-1">
               <h1 style={{ fontFamily: "'Orbitron', sans-serif" }} className="text-3xl font-black text-[var(--fg)] uppercase tracking-widest">
@@ -2927,7 +3187,7 @@ export default function App() {
           </div>
         )}
 
-        {view === 'cube' && selectedCube && (
+        {effectiveView === 'cube' && selectedCube && (
           <div>
             <div className="flex items-center gap-2 text-base text-[var(--mutedFg)] mb-4 flex-wrap">
               <button onClick={backToDashboard} className="flex items-center gap-1 hover:text-[var(--accentText)] transition">
@@ -3198,6 +3458,14 @@ export default function App() {
           onClose={() => setShowAssignModal(false)}
           onSubmit={assignTask}
           resolveAuthorName={resolveAuthorName}
+        />
+      )}
+
+      {showDesignTaskModal && (
+        <DesignTaskModal
+          designers={allProfiles.filter((p) => p.role === 'designer')}
+          onClose={() => setShowDesignTaskModal(false)}
+          onSubmit={createDesignTask}
         />
       )}
 
