@@ -349,12 +349,12 @@ function CommentSection({ title, icon: Icon, comments, onAdd, placeholder, loadi
         })}
       </div>
       <div className="flex gap-2">
-        <input
+        <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder={placeholder}
-          onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
-          className="flex-1 bg-[var(--card)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)] placeholder-[#4b5563] focus:outline-none focus:ring-2 focus:ring-[#00ff88]"
+          rows={1}
+          className="flex-1 bg-[var(--card)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)] placeholder-[#4b5563] focus:outline-none focus:ring-2 focus:ring-[#00ff88] resize-y"
         />
         <button
           onClick={submit}
@@ -449,12 +449,12 @@ function FileCommentThread({ comments, onAdd, loading, showPageInput, onEdit, on
             className="w-14 bg-[var(--card)] border border-[var(--border)] cyber-chamfer-sm px-2 py-1.5 text-sm text-center focus:outline-none focus:ring-2 focus:ring-[#00ff88]"
           />
         )}
-        <input
+        <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
           placeholder={showPageInput ? '針對這一頁留言校稿...' : '針對這個版本留言校稿...'}
-          className="flex-1 bg-[var(--card)] border border-[var(--border)] cyber-chamfer-sm px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#00ff88]"
+          rows={1}
+          className="flex-1 bg-[var(--card)] border border-[var(--border)] cyber-chamfer-sm px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#00ff88] resize-y"
         />
         <button
           onClick={submit}
@@ -1090,12 +1090,12 @@ function FileCommentThreadInput({ onAdd }) {
   };
   return (
     <div className="flex gap-1.5 shrink-0">
-      <input
+      <textarea
         value={text}
         onChange={(e) => setText(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
         placeholder="針對這一頁留言校稿..."
-        className="flex-1 bg-[var(--muted)] border border-[var(--border)] cyber-chamfer-sm px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#00ff88]"
+        rows={1}
+        className="flex-1 bg-[var(--muted)] border border-[var(--border)] cyber-chamfer-sm px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#00ff88] resize-y"
       />
       <button
         onClick={submit}
@@ -1153,10 +1153,23 @@ function AddFileModal({ kindLabel, form, setForm, onClose, onSubmit, submitting 
   );
 }
 
-function ReportModal({ onClose }) {
+function ReportModal({ onClose, onSubmit }) {
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
   const [sent, setSent] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  const submit = async () => {
+    if (!title.trim() || submitting) return;
+    setSubmitting(true);
+    setError('');
+    const { error } = await onSubmit(title.trim(), desc.trim());
+    setSubmitting(false);
+    if (error) { setError('送出失敗：' + error.message); return; }
+    setSent(true);
+  };
+
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[100] p-4" onClick={onClose}>
       <div className="bg-[var(--card)] border border-[var(--border)] cyber-chamfer w-full max-w-md p-6 shadow-[0_0_30px_rgba(0,255,136,0.15)]" onClick={(e) => e.stopPropagation()}>
@@ -1185,12 +1198,13 @@ function ReportModal({ onClose }) {
                 className="w-full bg-[var(--card)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)] focus:outline-none focus:ring-2 focus:ring-[#00ff88]"
               />
               <button
-                onClick={() => setSent(true)}
-                disabled={!title.trim()}
+                onClick={submit}
+                disabled={!title.trim() || submitting}
                 className="w-full border-2 border-[#00ff88] text-[var(--accentText)] bg-transparent cyber-chamfer-sm py-2.5 font-mono uppercase tracking-wider disabled:opacity-30 disabled:cursor-not-allowed hover:bg-[#00ff88] hover:text-[#0a0a0f] hover:shadow-[0_0_5px_#00ff88,0_0_10px_#00ff8840] transition"
               >
-                送出回報
+                {submitting ? '送出中...' : '送出回報'}
               </button>
+              {error && <p className="text-sm text-[var(--dangerText)]">{error}</p>}
             </div>
           </>
         ) : (
@@ -1240,7 +1254,7 @@ function NotificationPanel({ role, recentComments, tasks, currentUserEmail, reso
                   在「<span className="text-[var(--cyanText)]">{c.cube_name}</span>」留言
                   {c.page_number ? `（第 ${c.page_number} 頁）` : ''}：
                 </p>
-                <p className="text-sm text-[var(--fg)] break-words">{c.content}</p>
+                <p className="text-sm text-[var(--fg)] break-words whitespace-pre-wrap">{c.content}</p>
               </div>
             ))}
           </div>
@@ -2153,7 +2167,7 @@ function Header({ profile, session, role, onOpenAdmin, onOpenProfile, onLogout, 
             {roleMeta && <roleMeta.icon className="w-3.5 h-3.5 text-[var(--accentText)]" />}
             <span className="text-[var(--fg)] font-medium">{profile.nickname || session.user.email}，老師好</span>
           </button>
-          {(role === 'admin' || role === 'internal_partner' || role === 'designer') && (
+          {(role === 'admin' || role === 'internal_partner') && (
             <button
               onClick={onOpenNotif}
               className="relative flex items-center justify-center border border-[var(--border)] text-[var(--fg)] bg-transparent w-9 h-9 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
@@ -2705,6 +2719,8 @@ export default function App() {
     fetchProfileDirectory();
     if (role === 'admin' || role === 'internal_partner' || role === 'designer') {
       fetchAllCubeStatus();
+    }
+    if (role === 'admin' || role === 'internal_partner') {
       fetchTasks();
       if (role === 'admin') fetchRecentComments();
     }
@@ -2712,6 +2728,16 @@ export default function App() {
       fetchDesignTasks();
     }
   }, [profile, fetchProfileDirectory, fetchAllCubeStatus, fetchTasks, fetchRecentComments, fetchDesignTasks]);
+
+  // admin 訂閱全站留言（含勘誤與建議回報）的即時異動，有人送出新留言/回報時鈴鐺紅點會立刻出現，不用重新整理頁面
+  useEffect(() => {
+    if (!profile || profile.role !== 'admin') return;
+    const channel = supabase
+      .channel('comments-admin-feed')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'comments' }, () => fetchRecentComments())
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [profile, fetchRecentComments]);
 
   const fetchDraftFiles = useCallback(async (cubeName) => {
     const { data, error } = await supabase.from('cube_drafts').select('*').eq('cube_name', cubeName).order('created_at', { ascending: true });
@@ -2854,6 +2880,20 @@ export default function App() {
     fetchEditedFiles(selectedCube.name);
   };
 
+  // 勘誤與建議回報：借用 comments 表，掛在目前檢視的方塊底下，內容加上識別前綴，
+  // 這樣就能直接搭上 admin 既有的「最新留言與校稿動態」通知，不用另外蓋一套通知機制
+  const submitReport = async (title, desc) => {
+    if (!selectedCube || !session) return { error: new Error('目前沒有選取方塊，請重新開啟回報視窗') };
+    const { error } = await supabase.from('comments').insert({
+      cube_name: selectedCube.name,
+      user_email: session.user.email,
+      content: `【勘誤與建議回報】${title}${desc ? `\n${desc}` : ''}`,
+      is_internal: true,
+    });
+    if (error) console.error('[勘誤與建議回報送出失敗]', error.message, error);
+    return { error };
+  };
+
   const postGeneralComment = async (content, isInternal) => {
     if (!selectedCube || !session) return;
     const { error } = await supabase.from('comments').insert({
@@ -2988,7 +3028,7 @@ export default function App() {
 
   const hasUnseenActivity = role === 'admin'
     ? recentComments.some((c) => new Date(c.created_at) > new Date(profile.notif_seen_at || 0))
-    : role === 'internal_partner' || role === 'designer'
+    : role === 'internal_partner'
       ? tasks.some((t) => t.assigned_to === session.user.email && t.status !== 'done')
       : false;
   const hasPendingDesignTasks = role === 'designer'
@@ -3082,6 +3122,8 @@ export default function App() {
         onOpenNotif={() => { setShowNotifPanel(true); if (role === 'admin') markNotificationsSeen(); }}
         onOpenAssign={() => { fetchAllProfiles(); setShowAssignModal(true); }}
         onOpenInternalDocs={() => { fetchInternalDocs(); fetchInternalDocComments(); setShowInternalDocsPanel(true); }}
+        onOpenSchedule={() => { setView('schedule'); fetchDesignTasks(); if (role === 'admin') fetchAllProfiles(); }}
+        hasPendingDesignTasks={hasPendingDesignTasks}
       />
 
       <main className="max-w-7xl mx-auto px-6 py-8">
@@ -3400,7 +3442,7 @@ export default function App() {
         />
       )}
 
-      {showReportModal && <ReportModal onClose={() => setShowReportModal(false)} />}
+      {showReportModal && <ReportModal onClose={() => setShowReportModal(false)} onSubmit={submitReport} />}
 
       {reviewFile && (
         <ReviewModal
