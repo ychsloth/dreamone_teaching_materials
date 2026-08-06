@@ -2153,7 +2153,7 @@ function Header({ profile, session, role, onOpenAdmin, onOpenProfile, onLogout, 
             {roleMeta && <roleMeta.icon className="w-3.5 h-3.5 text-[var(--accentText)]" />}
             <span className="text-[var(--fg)] font-medium">{profile.nickname || session.user.email}，老師好</span>
           </button>
-          {(role === 'admin' || role === 'internal_partner') && (
+          {(role === 'admin' || role === 'internal_partner' || role === 'designer') && (
             <button
               onClick={onOpenNotif}
               className="relative flex items-center justify-center border border-[var(--border)] text-[var(--fg)] bg-transparent w-9 h-9 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
@@ -2165,7 +2165,7 @@ function Header({ profile, session, role, onOpenAdmin, onOpenProfile, onLogout, 
               )}
             </button>
           )}
-          {(role === 'admin' || role === 'internal_partner') && (
+          {(role === 'admin' || role === 'internal_partner' || role === 'designer') && (
             <button
               onClick={onOpenInternalDocs}
               className="flex items-center gap-1.5 text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
@@ -2703,7 +2703,7 @@ export default function App() {
     if (!profile || profile.status !== 'approved' || !profile.nickname) return;
     const role = profile.role;
     fetchProfileDirectory();
-    if (role === 'admin' || role === 'internal_partner') {
+    if (role === 'admin' || role === 'internal_partner' || role === 'designer') {
       fetchAllCubeStatus();
       fetchTasks();
       if (role === 'admin') fetchRecentComments();
@@ -2753,7 +2753,7 @@ export default function App() {
     fetchVideoFiles(selectedCube.name);
     fetchBoxFiles(selectedCube.name);
     fetchCubeComments(selectedCube.name);
-    if (role === 'admin' || role === 'internal_partner') fetchCubeArticle(selectedCube.name);
+    if (role === 'admin' || role === 'internal_partner' || role === 'designer') fetchCubeArticle(selectedCube.name);
 
     const draftsChannel = supabase
       .channel(`drafts-${selectedCube.id}`)
@@ -2988,7 +2988,7 @@ export default function App() {
 
   const hasUnseenActivity = role === 'admin'
     ? recentComments.some((c) => new Date(c.created_at) > new Date(profile.notif_seen_at || 0))
-    : role === 'internal_partner'
+    : role === 'internal_partner' || role === 'designer'
       ? tasks.some((t) => t.assigned_to === session.user.email && t.status !== 'done')
       : false;
   const hasPendingDesignTasks = role === 'designer'
@@ -2996,8 +2996,6 @@ export default function App() {
     : role === 'admin'
       ? designTasks.some((t) => t.status !== 'done')
       : false;
-  // 設計師沒有方塊瀏覽的權限，一律導向排程清單頁
-  const effectiveView = role === 'designer' && (view === 'dashboard' || view === 'cube') ? 'schedule' : view;
   if (!role || !ROLE_META[role]) {
     console.error(`[角色錯誤] profile.role 的值「${role}」不在 ROLE_META 定義的角色中`);
     return <LoadingScreen label="角色設定異常，請聯繫總監..." />;
@@ -3008,7 +3006,7 @@ export default function App() {
     return <LoadingScreen label="載入圖片對照表中..." />;
   }
 
-  const canManageFiles = role === 'admin' || role === 'internal_partner';
+  const canManageFiles = role === 'admin' || role === 'internal_partner' || role === 'designer';
 
   const instructorComments = cubeComments.filter((c) => !c.is_internal && !c.draft_id && !c.final_id && !c.video_id && !c.box_id && !c.article_id);
   const articleComments = cubeArticle ? cubeComments.filter((c) => c.article_id === cubeArticle.id) : [];
@@ -3087,7 +3085,7 @@ export default function App() {
       />
 
       <main className="max-w-7xl mx-auto px-6 py-8">
-        {effectiveView === 'schedule' && (
+        {view === 'schedule' && (
           <ScheduleView
             role={role}
             currentUserEmail={session.user.email}
@@ -3099,7 +3097,7 @@ export default function App() {
           />
         )}
 
-        {effectiveView === 'dashboard' && (
+        {view === 'dashboard' && (
           <div>
             <div className="flex items-center justify-between flex-wrap gap-3 mb-1">
               <h1 style={{ fontFamily: "'Orbitron', sans-serif" }} className="text-3xl font-black text-[var(--fg)] uppercase tracking-widest">
@@ -3187,7 +3185,7 @@ export default function App() {
           </div>
         )}
 
-        {effectiveView === 'cube' && selectedCube && (
+        {view === 'cube' && selectedCube && (
           <div>
             <div className="flex items-center gap-2 text-base text-[var(--mutedFg)] mb-4 flex-wrap">
               <button onClick={backToDashboard} className="flex items-center gap-1 hover:text-[var(--accentText)] transition">
@@ -3253,7 +3251,7 @@ export default function App() {
               <CubeNavButton direction="next" cube={nextCube} onNavigate={openCube} brokenImages={brokenImages} setBrokenImages={setBrokenImages} />
             </div>
 
-            {(role === 'admin' || role === 'internal_partner') && (
+            {(role === 'admin' || role === 'internal_partner' || role === 'designer') && (
               <div className="space-y-6">
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                   <VersionedFileBlock
