@@ -5,7 +5,7 @@ import {
   Shield, Users, GraduationCap, ChevronDown, ChevronRight, ChevronLeft, UploadCloud,
   FileText, MessageSquare, Send, AlertTriangle, X, Lock, Boxes, UserCheck,
   ArrowLeft, Box, CheckCircle2, ShieldCheck, ExternalLink, LogOut, Loader2,
-  Clock, Video, FolderOpen, Newspaper, ImagePlus, Camera, LayoutDashboard, Sun, Moon, Bell, ClipboardList, Palette
+  Clock, Video, FolderOpen, Newspaper, ImagePlus, Camera, LayoutDashboard, Sun, Moon, Bell, ClipboardList, Palette, Eye
 } from 'lucide-react';
 
 // react-pdf 需要一個獨立的 worker 檔案才能解析 PDF，這裡用 CDN 版本，版本號要跟 react-pdf 內附的 pdfjs-dist 對上
@@ -1378,8 +1378,9 @@ function AssignTaskModal({ cubeOptions, internalUsers, onClose, onSubmit, resolv
 }
 
 // 設計師排程清單頁：admin 在這裡指派「要修改的內容／要製作的新講義」，設計師登入後只看到指派給自己的項目
-function ScheduleView({ role, currentUserEmail, tasks, onOpenCreate, onMarkDone, onDelete, resolveAuthorName }) {
+function ScheduleView({ role, currentUserEmail, session, tasks, onOpenCreate, onMarkDone, onDelete, resolveAuthorName }) {
   const [filter, setFilter] = useState('pending');
+  const [previewTask, setPreviewTask] = useState(null);
 
   const visibleTasks = role === 'designer' ? tasks.filter((t) => t.assigned_to === currentUserEmail) : tasks;
   const filtered = visibleTasks
@@ -1435,6 +1436,12 @@ function ScheduleView({ role, currentUserEmail, tasks, onOpenCreate, onMarkDone,
                   )}
                 </div>
                 <h3 className="text-lg font-semibold text-[var(--fg)]">{t.title}</h3>
+                {t.task_type === 'revise' && t.cube_name && (
+                  <p className="text-sm text-[var(--cyanText)] mt-1">
+                    方塊：{t.cube_name}{t.file_category ? `・${t.file_category === 'edited' ? '美編講義' : '草稿講義'}` : ''}
+                    {t.pages && t.pages.length > 0 ? `・第 ${[...t.pages].sort((a, b) => a - b).join('、')} 頁` : ''}
+                  </p>
+                )}
                 {t.description && <p className="text-base text-[var(--fg)] mt-1 whitespace-pre-wrap break-words">{t.description}</p>}
                 <p className="text-sm text-[var(--mutedFg)] mt-2">
                   {role === 'admin' ? `指派給：${resolveAuthorName(t.assigned_to)}・` : `指派人：${resolveAuthorName(t.assigned_by)}・`}
@@ -1443,6 +1450,14 @@ function ScheduleView({ role, currentUserEmail, tasks, onOpenCreate, onMarkDone,
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
+                {t.task_type === 'revise' && t.cube_name && t.file_id && (
+                  <button
+                    onClick={() => setPreviewTask(t)}
+                    className="flex items-center gap-1.5 text-sm font-mono uppercase tracking-wider border border-[var(--cyanText)]/60 text-[var(--cyanText)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:bg-[var(--cyanText)] hover:text-[#0a0a0f] transition"
+                  >
+                    <Eye className="w-3.5 h-3.5" /> 預覽頁面
+                  </button>
+                )}
                 {role === 'designer' && t.status !== 'done' && (
                   <button
                     onClick={() => onMarkDone(t.id)}
@@ -1464,25 +1479,122 @@ function ScheduleView({ role, currentUserEmail, tasks, onOpenCreate, onMarkDone,
           </div>
         ))}
       </div>
+
+      {previewTask && <DesignTaskPreviewModal task={previewTask} session={session} onClose={() => setPreviewTask(null)} />}
+    </div>
+  );
+}
+
+// 設計師（或 admin 自己檢查）打開排程項目時，直接看到指定頁面跟要修改的文字說明
+function DesignTaskPreviewModal({ task, session, onClose }) {
+  const pages = task.pages && task.pages.length > 0 ? [...task.pages].sort((a, b) => a - b) : [1];
+  const [idx, setIdx] = useState(0);
+  const currentPage = pages[idx];
+
+  return (
+    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[300] p-4" onClick={onClose}>
+      <div
+        className="bg-[var(--card)] border border-[var(--border)] cyber-chamfer w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between p-4 border-b border-[var(--border)] shrink-0">
+          <div className="min-w-0">
+            <h3 className="font-semibold text-lg text-[var(--fg)] truncate">
+              {task.cube_name}・{task.file_category === 'edited' ? '美編講義' : '草稿講義'}
+            </h3>
+            <p className="text-sm text-[var(--mutedFg)] truncate">{task.title}</p>
+          </div>
+          <button onClick={onClose} className="shrink-0">
+            <X className="w-5 h-5 text-[var(--mutedFg)] hover:text-[var(--accentText)]" />
+          </button>
+        </div>
+        <div className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden">
+          <div className="flex-1 min-h-[320px] bg-black flex flex-col">
+            <div className="flex-1 min-h-0">
+              <DrivePdfViewer category={task.file_category} recordId={task.file_id} pageNumber={currentPage} onNumPages={() => {}} session={session} fitHeight />
+            </div>
+            {pages.length > 1 && (
+              <div className="flex items-center justify-center gap-3 p-2 border-t border-[var(--border)] bg-[var(--card)] shrink-0">
+                <button
+                  onClick={() => setIdx((i) => Math.max(0, i - 1))}
+                  disabled={idx <= 0}
+                  className="border border-[var(--border)] text-[var(--fg)] px-3 py-1.5 cyber-chamfer-sm text-sm font-mono disabled:opacity-30 hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
+                >
+                  上一頁
+                </button>
+                <span className="text-sm font-mono text-[var(--fg)]">第 {currentPage} 頁（{idx + 1}/{pages.length}）</span>
+                <button
+                  onClick={() => setIdx((i) => Math.min(pages.length - 1, i + 1))}
+                  disabled={idx >= pages.length - 1}
+                  className="border border-[var(--border)] text-[var(--fg)] px-3 py-1.5 cyber-chamfer-sm text-sm font-mono disabled:opacity-30 hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
+                >
+                  下一頁
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="w-full md:w-80 shrink-0 border-t md:border-t-0 md:border-l border-[var(--border)] p-4 overflow-y-auto">
+            <p className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-2">要修改的內容</p>
+            <p className="text-base text-[var(--fg)] whitespace-pre-wrap break-words">{task.description || '（沒有補充說明）'}</p>
+            {task.pages && task.pages.length > 0 && (
+              <p className="text-sm text-[var(--mutedFg)] mt-4">指定頁碼：第 {[...task.pages].sort((a, b) => a - b).join('、')} 頁</p>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
 
 // 指派排程項目給設計師（admin 專用）
-function DesignTaskModal({ designers, onClose, onSubmit }) {
-  const [form, setForm] = useState({ title: '', description: '', task_type: 'revise', assigned_to: designers[0] ? designers[0].email : '', due_date: '' });
+function DesignTaskModal({ designers, cubeOptions, session, onClose, onSubmit }) {
+  const [form, setForm] = useState({
+    title: '', description: '', task_type: 'revise', assigned_to: designers[0] ? designers[0].email : '', due_date: '',
+    cube_name: '', file_category: '', file_id: '', pages: [],
+  });
   const [submitting, setSubmitting] = useState(false);
+  const [cubeFiles, setCubeFiles] = useState([]);
+  const [loadingFiles, setLoadingFiles] = useState(false);
+  const [previewPage, setPreviewPage] = useState(1);
+  const [numPages, setNumPages] = useState(0);
+
+  useEffect(() => {
+    if (form.task_type !== 'revise' || !form.cube_name) { setCubeFiles([]); return; }
+    let cancelled = false;
+    setLoadingFiles(true);
+    (async () => {
+      const [draftRes, editedRes] = await Promise.all([
+        supabase.from('cube_drafts').select('*').eq('cube_name', form.cube_name).order('created_at', { ascending: true }),
+        supabase.from('cube_final').select('*').eq('cube_name', form.cube_name).order('created_at', { ascending: true }),
+      ]);
+      if (cancelled) return;
+      const edited = (editedRes.data || []).map((f) => ({ ...f, category: 'edited' }));
+      const draft = (draftRes.data || []).map((f) => ({ ...f, category: 'draft' }));
+      setCubeFiles([...edited, ...draft]);
+      setLoadingFiles(false);
+    })();
+    return () => { cancelled = true; };
+  }, [form.task_type, form.cube_name]);
+
+  const selectedFile = cubeFiles.find((f) => f.category === form.file_category && f.id === form.file_id) || null;
+
+  const togglePage = (p) => {
+    setForm((f) => ({ ...f, pages: f.pages.includes(p) ? f.pages.filter((x) => x !== p) : [...f.pages, p] }));
+  };
 
   const submit = async () => {
     if (!form.title.trim() || !form.assigned_to) return;
+    if (form.task_type === 'revise' && (!form.cube_name || !form.file_id || form.pages.length === 0)) return;
     setSubmitting(true);
     await onSubmit(form);
     setSubmitting(false);
   };
 
+  const reviseIncomplete = form.task_type === 'revise' && (!form.cube_name || !form.file_id || form.pages.length === 0);
+
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[260] p-4" onClick={onClose}>
-      <div className="bg-[var(--card)] border border-[var(--border)] cyber-chamfer w-full max-w-md p-6 shadow-[0_0_30px_rgba(0,255,136,0.15)]" onClick={(e) => e.stopPropagation()}>
+      <div className="bg-[var(--card)] border border-[var(--border)] cyber-chamfer w-full max-w-lg p-6 shadow-[0_0_30px_rgba(0,255,136,0.15)] max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="font-semibold text-xl flex items-center gap-2 text-[var(--fg)] uppercase tracking-wide font-mono">
             <ClipboardList className="w-5 h-5 text-[var(--accentText)]" /> 新增排程項目
@@ -1509,7 +1621,7 @@ function DesignTaskModal({ designers, onClose, onSubmit }) {
               <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">類型</label>
               <select
                 value={form.task_type}
-                onChange={(e) => setForm((f) => ({ ...f, task_type: e.target.value }))}
+                onChange={(e) => setForm((f) => ({ ...f, task_type: e.target.value, cube_name: '', file_category: '', file_id: '', pages: [] }))}
                 className="w-full bg-[var(--muted)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)]"
               >
                 <option value="revise">修改內容</option>
@@ -1517,6 +1629,101 @@ function DesignTaskModal({ designers, onClose, onSubmit }) {
                 <option value="other">其他</option>
               </select>
             </div>
+
+            {form.task_type === 'revise' && (
+              <div className="space-y-3 border border-[var(--border)] cyber-chamfer-sm p-3 bg-[var(--muted)]/40">
+                <div>
+                  <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">方塊</label>
+                  <select
+                    value={form.cube_name}
+                    onChange={(e) => setForm((f) => ({ ...f, cube_name: e.target.value, file_category: '', file_id: '', pages: [] }))}
+                    className="w-full bg-[var(--card)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)]"
+                  >
+                    <option value="">請選擇方塊</option>
+                    {cubeOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+                  </select>
+                </div>
+
+                {form.cube_name && (
+                  loadingFiles ? (
+                    <p className="text-sm text-[var(--mutedFg)]">讀取版本中...</p>
+                  ) : cubeFiles.length === 0 ? (
+                    <p className="text-sm text-[var(--mutedFg)]">這顆方塊目前還沒有草稿或美編檔案</p>
+                  ) : (
+                    <div>
+                      <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">版本</label>
+                      <select
+                        value={form.file_category && form.file_id ? `${form.file_category}:${form.file_id}` : ''}
+                        onChange={(e) => {
+                          const [category, id] = e.target.value.split(':');
+                          setForm((f) => ({ ...f, file_category: category || '', file_id: id || '', pages: [] }));
+                          setPreviewPage(1);
+                        }}
+                        className="w-full bg-[var(--card)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)]"
+                      >
+                        <option value="">請選擇版本</option>
+                        {cubeFiles.map((f) => (
+                          <option key={`${f.category}:${f.id}`} value={`${f.category}:${f.id}`}>
+                            {f.category === 'edited' ? '美編講義' : '草稿講義'}・{f.version_label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )
+                )}
+
+                {selectedFile && (
+                  <div>
+                    <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">頁碼（可複選，瀏覽後點「加入這一頁」）</label>
+                    <div className="border border-[var(--border)]">
+                      <DrivePdfViewer category={selectedFile.category} recordId={selectedFile.id} pageNumber={previewPage} onNumPages={setNumPages} session={session} pageWidth={280} />
+                    </div>
+                    {numPages > 0 && (
+                      <>
+                        <div className="flex items-center justify-between mt-2 gap-2">
+                          <button
+                            onClick={() => setPreviewPage((p) => Math.max(1, p - 1))}
+                            disabled={previewPage <= 1}
+                            className="border border-[var(--border)] text-[var(--fg)] px-3 py-1.5 cyber-chamfer-sm text-sm font-mono disabled:opacity-30 hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
+                          >
+                            上一頁
+                          </button>
+                          <span className="text-sm font-mono text-[var(--fg)]">第 {previewPage} 頁，共 {numPages} 頁</span>
+                          <button
+                            onClick={() => setPreviewPage((p) => Math.min(numPages, p + 1))}
+                            disabled={previewPage >= numPages}
+                            className="border border-[var(--border)] text-[var(--fg)] px-3 py-1.5 cyber-chamfer-sm text-sm font-mono disabled:opacity-30 hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
+                          >
+                            下一頁
+                          </button>
+                        </div>
+                        <button
+                          onClick={() => togglePage(previewPage)}
+                          className={`w-full mt-2 border-2 cyber-chamfer-sm text-sm font-mono uppercase tracking-wider py-1.5 transition ${
+                            form.pages.includes(previewPage)
+                              ? 'border-[#00ff88] bg-[#00ff88] text-[#0a0a0f]'
+                              : 'border-[#00ff88] text-[var(--accentText)] bg-transparent hover:bg-[#00ff88] hover:text-[#0a0a0f]'
+                          }`}
+                        >
+                          {form.pages.includes(previewPage) ? '✓ 已加入這一頁（點擊移除）' : '+ 加入這一頁'}
+                        </button>
+                        {form.pages.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5 mt-2">
+                            {[...form.pages].sort((a, b) => a - b).map((p) => (
+                              <span key={p} className="flex items-center gap-1 text-sm font-mono border border-[#00ff88]/50 text-[var(--accentText)] px-2 py-0.5 cyber-chamfer-sm">
+                                第{p}頁
+                                <button onClick={() => togglePage(p)} className="hover:text-[var(--dangerText)]"><X className="w-3 h-3" /></button>
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             <div>
               <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">指派給</label>
               <select
@@ -1537,7 +1744,7 @@ function DesignTaskModal({ designers, onClose, onSubmit }) {
               />
             </div>
             <div>
-              <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">詳細說明（選填）</label>
+              <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">詳細說明{form.task_type === 'revise' ? '（要修改的文字內容）' : '（選填）'}</label>
               <textarea
                 value={form.description}
                 onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
@@ -1548,11 +1755,14 @@ function DesignTaskModal({ designers, onClose, onSubmit }) {
             </div>
             <button
               onClick={submit}
-              disabled={submitting || !form.title.trim() || !form.assigned_to}
+              disabled={submitting || !form.title.trim() || !form.assigned_to || reviseIncomplete}
               className="w-full border-2 border-[#00ff88] text-[var(--accentText)] bg-transparent cyber-chamfer-sm font-mono uppercase tracking-wider py-2.5 disabled:opacity-40 hover:bg-[#00ff88] hover:text-[#0a0a0f] transition"
             >
               {submitting ? '指派中...' : '送出指派'}
             </button>
+            {reviseIncomplete && (
+              <p className="text-sm text-[var(--mutedFg)] text-center">「修改內容」類型需要選好方塊、版本，並至少加入一個頁碼</p>
+            )}
           </div>
         )}
       </div>
@@ -2563,6 +2773,7 @@ export default function App() {
   }, []);
 
   const createDesignTask = async (form) => {
+    const isRevise = form.task_type === 'revise';
     const { error } = await supabase.from('design_tasks').insert({
       title: form.title,
       description: form.description || null,
@@ -2570,6 +2781,10 @@ export default function App() {
       assigned_to: form.assigned_to,
       assigned_by: session.user.email,
       due_date: form.due_date || null,
+      cube_name: isRevise ? form.cube_name || null : null,
+      file_category: isRevise ? form.file_category || null : null,
+      file_id: isRevise ? form.file_id || null : null,
+      pages: isRevise && form.pages && form.pages.length > 0 ? form.pages : null,
     });
     if (error) { console.error('[新增排程任務失敗]', error.message, error); showToast('新增失敗：' + error.message); return; }
     showToast('已新增排程項目');
@@ -3131,6 +3346,7 @@ export default function App() {
           <ScheduleView
             role={role}
             currentUserEmail={session.user.email}
+            session={session}
             tasks={designTasks}
             onOpenCreate={() => { fetchAllProfiles(); setShowDesignTaskModal(true); }}
             onMarkDone={markDesignTaskDone}
@@ -3504,6 +3720,8 @@ export default function App() {
       {showDesignTaskModal && (
         <DesignTaskModal
           designers={allProfiles.filter((p) => p.role === 'designer')}
+          cubeOptions={ALL_CUBES_FLAT.map((c) => c.name)}
+          session={session}
           onClose={() => setShowDesignTaskModal(false)}
           onSubmit={createDesignTask}
         />
