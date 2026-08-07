@@ -5,7 +5,8 @@ import {
   Shield, Users, GraduationCap, ChevronDown, ChevronRight, ChevronLeft, UploadCloud,
   FileText, MessageSquare, Send, AlertTriangle, X, Lock, Boxes, UserCheck,
   ArrowLeft, Box, CheckCircle2, ShieldCheck, ExternalLink, LogOut, Loader2,
-  Clock, Video, FolderOpen, Newspaper, ImagePlus, Camera, LayoutDashboard, Sun, Moon, Bell, ClipboardList, Palette, Eye
+  Clock, Video, FolderOpen, Newspaper, ImagePlus, Camera, LayoutDashboard, Sun, Moon, Bell, ClipboardList, Palette, Eye,
+  Contrast, Paintbrush, Pipette, Download
 } from 'lucide-react';
 
 // react-pdf 需要一個獨立的 worker 檔案才能解析 PDF，這裡用 CDN 版本，版本號要跟 react-pdf 內附的 pdfjs-dist 對上
@@ -1823,6 +1824,877 @@ function DesignTaskModal({ designers, cubeOptions, session, editingTask, onClose
   );
 }
 
+// ============================================================================
+// 灰階降彩度工具（設計師專用）：上傳方塊照片 → 依「魔術方塊只有白、黃、紅、橘、
+// 藍、綠六種貼紙顏色＋黑色框線」逐像素辨識格線、切成一格一格 → 點擊/筆刷降低
+// 彩度、即時預覽 → 下載。演算法先在獨立原型裡反覆用真實照片測試調整過，這裡
+// 是照那個版本原封不動搬過來，只是把 DOM 操作換成 React state／ref。
+// ============================================================================
+const GRAY_V_BLACK_DEFAULT = 0.35;
+const GRAY_S_WHITE_DEFAULT = 0.18;
+const GRAY_HUES_DEFAULT = { orange: 20.7, yellow: 50.1, green: 156.5, blue: 213.9, red: 349.8 };
+const GRAY_MIN_AREA_FRAC = 0.0006;
+const GRAY_MAX_AREA_FRAC = 0.35;
+const GRAY_CALIB_LABEL = { black: '黑框', white: '白', yellow: '黃', red: '紅', orange: '橘', blue: '藍', green: '綠' };
+const GRAY_SWATCH_BG = { black: '#1a1a1a', white: '#ffffff', yellow: '#F0C020', red: '#D02020', orange: '#e6820c', blue: '#1040C0', green: '#1e8449' };
+const GRAY_SWATCH_FG = { black: '#fff', white: '#111', yellow: '#111', red: '#fff', orange: '#fff', blue: '#fff', green: '#fff' };
+
+function grayCircularMidpoint(a, b) {
+  let diff = b - a; if (diff < 0) diff += 360;
+  let mid = a + diff / 2; if (mid >= 360) mid -= 360;
+  return mid;
+}
+function grayBuildContiguousRanges(hueMap) {
+  const entries = Object.keys(hueMap).map((name) => ({ name, h: ((hueMap[name] % 360) + 360) % 360 }));
+  entries.sort((a, b) => a.h - b.h);
+  const k = entries.length;
+  const ranges = [];
+  for (let i = 0; i < k; i++) {
+    const prev = entries[(i - 1 + k) % k], cur = entries[i], next = entries[(i + 1) % k];
+    const lo = grayCircularMidpoint(prev.h, cur.h);
+    const hi = grayCircularMidpoint(cur.h, next.h);
+    ranges.push(lo < hi ? [cur.name, [[lo, hi]]] : [cur.name, [[lo, 360], [0, hi]]]);
+  }
+  return ranges;
+}
+const GRAY_COLOR_RANGES_DEFAULT = grayBuildContiguousRanges(GRAY_HUES_DEFAULT);
+const GRAY_CLASS_CODE = { black: 0, white: 1, red: 2, orange: 3, yellow: 4, green: 5, blue: 6, unknown: 7 };
+
+// r,g,b（0~255）→ { v, s, h }，v/s 是 0~1，h 是 0~360 度。分類與滴管校色共用同一套
+// 換算，確保「這一小塊區域實際的顏色」跟「拿去比對的色相表」算的是同一件事。
+function grayRgbToHsv(r, g, b) {
+  const maxC = r > g ? (r > b ? r : b) : (g > b ? g : b);
+  const minC = r < g ? (r < b ? r : b) : (g < b ? g : b);
+  const v = maxC / 255;
+  const delta = maxC - minC;
+  const s = maxC === 0 ? 0 : delta / maxC;
+  if (delta === 0) return { v, s, h: 0 };
+  const d = delta;
+  let h;
+  if (maxC === r) h = ((g - b) / d) % 6;
+  else if (maxC === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  h *= 60; if (h < 0) h += 360;
+  return { v, s, h };
+}
+
+// 回傳: 'black' | 'white' | 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'unknown'
+function grayClassifyPixel(r, g, b, vBlack, sWhite, colorRanges) {
+  const { v: V, s: S, h } = grayRgbToHsv(r, g, b);
+  if (V < vBlack) return 'black';
+  if (S < sWhite) return 'white';
+  for (let ci = 0; ci < colorRanges.length; ci++) {
+    const ranges = colorRanges[ci][1];
+    for (let ri = 0; ri < ranges.length; ri++) {
+      if (h >= ranges[ri][0] && h < ranges[ri][1]) return colorRanges[ci][0];
+    }
+  }
+  return 'unknown'; // 理論上涵蓋整個色相環，這裡只是安全網
+}
+
+// 影像前處理：高斯模糊（僅用於「判斷用」的色彩分類，不影響輸出的實際像素顏色），
+// 降低相機感光雜訊造成的顏色跳動，讓分類更穩定
+function grayGaussianBlur(data, w, h) {
+  const radius = 2, sigma = 1.0;
+  const kernel = [];
+  let ksum = 0;
+  for (let i = -radius; i <= radius; i++) { const v = Math.exp(-(i * i) / (2 * sigma * sigma)); kernel.push(v); ksum += v; }
+  for (let i = 0; i < kernel.length; i++) kernel[i] /= ksum;
+  const n = w * h;
+  const tmp = new Float32Array(n * 3);
+  for (let y = 0; y < h; y++) {
+    const rowBase = y * w;
+    for (let x = 0; x < w; x++) {
+      let sr = 0, sg = 0, sb = 0;
+      for (let k = -radius; k <= radius; k++) {
+        let xx = x + k; if (xx < 0) xx = 0; else if (xx >= w) xx = w - 1;
+        const idx = (rowBase + xx) * 4, wgt = kernel[k + radius];
+        sr += data[idx] * wgt; sg += data[idx + 1] * wgt; sb += data[idx + 2] * wgt;
+      }
+      const ti = (rowBase + x) * 3;
+      tmp[ti] = sr; tmp[ti + 1] = sg; tmp[ti + 2] = sb;
+    }
+  }
+  const out = new Float32Array(n * 3);
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) {
+      let sr = 0, sg = 0, sb = 0;
+      for (let k = -radius; k <= radius; k++) {
+        let yy = y + k; if (yy < 0) yy = 0; else if (yy >= h) yy = h - 1;
+        const ti = (yy * w + x) * 3, wgt = kernel[k + radius];
+        sr += tmp[ti] * wgt; sg += tmp[ti + 1] * wgt; sb += tmp[ti + 2] * wgt;
+      }
+      const oi = (y * w + x) * 3;
+      out[oi] = sr; out[oi + 1] = sg; out[oi + 2] = sb;
+    }
+  }
+  return out;
+}
+
+// 移除孤立的雜訊黑塊／黑圈（反光高光周圍常見的暗暈邊、陰影黑點），只保留面積
+// 明顯夠大的真實格線網絡，其餘併回旁邊的貼紙
+function grayCleanIsolatedSpecks(isLine, w, h, minIslandSize) {
+  const n = w * h;
+  const label = new Int32Array(n);
+  const areas = [0];
+  const stack = new Int32Array(n);
+  let next = 1;
+  for (let start = 0; start < n; start++) {
+    if (!isLine[start] || label[start]) continue;
+    let sp = 0; stack[sp++] = start; label[start] = next;
+    let area = 0;
+    while (sp > 0) {
+      const idx = stack[--sp]; area++;
+      const x = idx % w, y = (idx / w) | 0;
+      if (x > 0) { const m = idx - 1; if (isLine[m] && !label[m]) { label[m] = next; stack[sp++] = m; } }
+      if (x < w - 1) { const m = idx + 1; if (isLine[m] && !label[m]) { label[m] = next; stack[sp++] = m; } }
+      if (y > 0) { const m = idx - w; if (isLine[m] && !label[m]) { label[m] = next; stack[sp++] = m; } }
+      if (y < h - 1) { const m = idx + w; if (isLine[m] && !label[m]) { label[m] = next; stack[sp++] = m; } }
+    }
+    areas.push(area); next++;
+  }
+  let largest = 0;
+  for (let l = 1; l < next; l++) if (areas[l] > largest) largest = areas[l];
+  const threshold = Math.max(minIslandSize, largest * 0.04);
+  for (let i = 0; i < n; i++) { if (label[i] && areas[label[i]] < threshold) isLine[i] = 0; }
+}
+
+// 填補格線上因反光被沖淡、只斷開1～2像素寬的小缺口（左右或上下兩側都已經是
+// 格線時才補上，避免整片膨脹誤連不相干的區域）
+function grayBridgeLineGaps(isLine, w, h, passes) {
+  for (let p = 0; p < passes; p++) {
+    const out = isLine.slice();
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (isLine[i]) continue;
+        const leftOk = x > 0 && isLine[i - 1];
+        const rightOk = x < w - 1 && isLine[i + 1];
+        const upOk = y > 0 && isLine[i - w];
+        const downOk = y < h - 1 && isLine[i + w];
+        if ((leftOk && rightOk) || (upOk && downOk)) out[i] = 1;
+      }
+    }
+    isLine.set(out);
+  }
+}
+
+// 形態學閉運算（先膨脹再侵蝕）：補 bridgeLineGaps 補不到的缺口——例如金字塔／
+// 風火輪這類多片格線從四面八方匯聚到同一個點的形狀，缺口是斜向、放射狀的，
+// 不是單純左右或上下兩側夾住。半徑只給 2px，足夠補掉匯聚點的針孔縫，不會吃掉
+// 真正的貼紙面積。
+function grayMorphDilate(mask, w, h) {
+  const out = new Uint8Array(mask.length);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (mask[i]) { out[i] = 1; continue; }
+      let hit = false;
+      for (let dy = -1; dy <= 1 && !hit; dy++) {
+        const yy = y + dy; if (yy < 0 || yy >= h) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx; if (xx < 0 || xx >= w) continue;
+          if (mask[yy * w + xx]) { hit = true; break; }
+        }
+      }
+      out[i] = hit ? 1 : 0;
+    }
+  }
+  return out;
+}
+function grayMorphErode(mask, w, h) {
+  const out = new Uint8Array(mask.length);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!mask[i]) { out[i] = 0; continue; }
+      let allSet = true;
+      for (let dy = -1; dy <= 1 && allSet; dy++) {
+        const yy = y + dy;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx;
+          if (yy < 0 || yy >= h || xx < 0 || xx >= w || !mask[yy * w + xx]) { allSet = false; break; }
+        }
+      }
+      out[i] = allSet ? 1 : 0;
+    }
+  }
+  return out;
+}
+function grayMorphClose(mask, w, h, radius) {
+  let m = mask;
+  for (let i = 0; i < radius; i++) m = grayMorphDilate(m, w, h);
+  for (let i = 0; i < radius; i++) m = grayMorphErode(m, w, h);
+  return m;
+}
+
+// 顏色交界輔助偵測：無貼紙方塊（拼接處沒有黑色間隙）或黑框被光線洗淡到偵測不
+// 到時，純靠「這格是不是黑色」完全找不到分隔線。這裡補一條規則：只要兩個相鄰
+// 像素被分類成「兩種不同的已知貼紙顏色」，就當作這裡有一條交界線。對一般有黑
+// 框的方塊完全不會誤觸發：黑框兩側其中一邊一定會被分類成「黑色」，不符合「兩
+// 邊都是已知顏色」的條件，兩種偵測方式可以並存、互不干擾。
+function grayBuildColorTransitionMask(classCodes, w, h) {
+  const trans = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const c = classCodes[i];
+      if (c === 0 || c === 7) continue;
+      if (x < w - 1) {
+        const cr = classCodes[i + 1];
+        if (cr !== 0 && cr !== 7 && cr !== c) { trans[i] = 1; trans[i + 1] = 1; }
+      }
+      if (y < h - 1) {
+        const cd = classCodes[i + w];
+        if (cd !== 0 && cd !== 7 && cd !== c) { trans[i] = 1; trans[i + w] = 1; }
+      }
+    }
+  }
+  return trans;
+}
+
+// 建立框線遮罩，回傳三份：
+//   rawLine — 黑色框線 + 無法辨識（+ 顏色交界，若開啟）合併後的原始分類結果，
+//     渲染／匯出時用來保證「非真正黑色」的部分不會被永久鎖住不能降低彩度。
+//   segLine — 在 rawLine 基礎上清除孤立雜訊、補小缺口，只用來做連通區塊分割。
+//   blackOnly — 只有真的判定成黑色框線的像素，渲染／匯出時唯一「保證永遠維持
+//     原圖」的依據。
+function grayBuildLineMask(data, w, h, useColorTransition, vBlack, sWhite, colorRanges) {
+  const n = w * h;
+  const blurred = grayGaussianBlur(data, w, h);
+  const rawLine = new Uint8Array(n);
+  const blackOnly = new Uint8Array(n);
+  const classCodes = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const bi = i * 3;
+    const cls = grayClassifyPixel(blurred[bi], blurred[bi + 1], blurred[bi + 2], vBlack, sWhite, colorRanges);
+    classCodes[i] = GRAY_CLASS_CODE[cls];
+    rawLine[i] = (cls === 'black' || cls === 'unknown') ? 1 : 0;
+    blackOnly[i] = cls === 'black' ? 1 : 0;
+  }
+  if (useColorTransition) {
+    const trans = grayBuildColorTransitionMask(classCodes, w, h);
+    for (let i = 0; i < n; i++) if (trans[i]) rawLine[i] = 1;
+  }
+  let segLine = rawLine.slice();
+  const minIsland = Math.max(4, Math.round(n * 0.000003));
+  grayCleanIsolatedSpecks(segLine, w, h, minIsland);
+  grayBridgeLineGaps(segLine, w, h, 2);
+  segLine = grayMorphClose(segLine, w, h, 2);
+  return { rawLine, segLine, blackOnly };
+}
+
+// 連通區塊分割（4方向flood fill），順便統計每塊的中心點座標，供匯出時把「原生
+// 解析度重新分割出的區塊」對應回使用者在預覽時點過的區塊
+function grayFloodFillLabel(isLine, w, h, minAreaFrac, maxAreaFrac) {
+  const n = w * h;
+  const label = new Int32Array(n);
+  const areas = [0], sumX = [0], sumY = [0];
+  const stack = new Int32Array(n);
+  let nextLabel = 1;
+  for (let start = 0; start < n; start++) {
+    if (isLine[start] || label[start]) continue;
+    let sp = 0; stack[sp++] = start; label[start] = nextLabel;
+    let area = 0, sx = 0, sy = 0;
+    while (sp > 0) {
+      const idx = stack[--sp];
+      area++;
+      const x = idx % w, y = (idx / w) | 0;
+      sx += x; sy += y;
+      if (x > 0) { const m = idx - 1; if (!isLine[m] && !label[m]) { label[m] = nextLabel; stack[sp++] = m; } }
+      if (x < w - 1) { const m = idx + 1; if (!isLine[m] && !label[m]) { label[m] = nextLabel; stack[sp++] = m; } }
+      if (y > 0) { const m = idx - w; if (!isLine[m] && !label[m]) { label[m] = nextLabel; stack[sp++] = m; } }
+      if (y < h - 1) { const m = idx + w; if (!isLine[m] && !label[m]) { label[m] = nextLabel; stack[sp++] = m; } }
+    }
+    areas.push(area); sumX.push(sx); sumY.push(sy);
+    nextLabel++;
+  }
+  const totalArea = n;
+  const minArea = totalArea * minAreaFrac;
+  const maxArea = totalArea * maxAreaFrac;
+  const centroidX = new Float64Array(nextLabel), centroidY = new Float64Array(nextLabel);
+  const valid = new Uint8Array(nextLabel);
+  let count = 0;
+  for (let l = 1; l < nextLabel; l++) {
+    centroidX[l] = sumX[l] / areas[l]; centroidY[l] = sumY[l] / areas[l];
+    if (areas[l] >= minArea && areas[l] <= maxArea) { valid[l] = 1; count++; }
+  }
+  for (let i = 0; i < n; i++) { if (label[i] && !valid[label[i]]) label[i] = 0; }
+  return { label, count, centroidX, centroidY, numLabels: nextLabel };
+}
+
+// 把「無法辨識但不是黑色」的像素，就近併入旁邊偵測到的色塊分組（4方向 BFS，
+// 遇到真正的黑色框線就停止擴散，所以不會跨過真實格線把兩塊不同貼紙的分組混在
+// 一起）。回傳的 resolvedLabel 拿來做「灰階與否」的判斷和「點擊命中測試」。
+function grayResolveUnknownLabels(rawLine, blackOnly, label, w, h) {
+  const n = w * h;
+  const resolved = label.slice();
+  const queue = new Int32Array(n);
+  let qHead = 0, qTail = 0;
+  for (let i = 0; i < n; i++) if (label[i]) queue[qTail++] = i;
+  while (qHead < qTail) {
+    const idx = queue[qHead++];
+    const lab = resolved[idx];
+    const x = idx % w, y = (idx / w) | 0;
+    const tryExpand = (m) => {
+      if (rawLine[m] && !blackOnly[m] && !resolved[m]) { resolved[m] = lab; queue[qTail++] = m; }
+    };
+    if (x > 0) tryExpand(idx - 1);
+    if (x < w - 1) tryExpand(idx + 1);
+    if (y > 0) tryExpand(idx - w);
+    if (y < h - 1) tryExpand(idx + w);
+  }
+  return resolved;
+}
+
+function grayMedian(arr) {
+  arr.sort((a, b) => a - b);
+  return arr[Math.floor(arr.length / 2)];
+}
+
+function GrayscaleTool() {
+  const canvasRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const paintingRef = useRef(false);
+  const lastPaintPointRef = useRef(null);
+  const stRef = useRef({
+    img: null, natW: 0, natH: 0, workW: 0, workH: 0, workOriginal: null,
+    lineMaskRaw: null, blackOnlyMask: null, boundaryMask: null,
+    desatBuffer: null, desatBufferPct: null, desatBufferColor: null,
+    labelMask: null, resolvedLabelMask: null, keep: new Map(), manualOverride: null,
+    vBlack: GRAY_V_BLACK_DEFAULT, sWhite: GRAY_S_WHITE_DEFAULT,
+    hues: { ...GRAY_HUES_DEFAULT }, colorRanges: GRAY_COLOR_RANGES_DEFAULT,
+  });
+  const st = stRef.current;
+
+  const [fileName, setFileName] = useState('');
+  const [hasImage, setHasImage] = useState(false);
+  const [regionCount, setRegionCount] = useState(0);
+  const [statusMsg, setStatusMsg] = useState('請先上傳一張魔術方塊照片，系統會自動偵測格線。');
+  const [showLineMask, setShowLineMask] = useState(false);
+  const [colorTransitionMode, setColorTransitionMode] = useState(true);
+  const [desatPct, setDesatPct] = useState(100);
+  const [grayColorHex, setGrayColorHex] = useState('#8c8c8c');
+  const [brushMode, setBrushMode] = useState(false);
+  const [brushForce, setBrushForce] = useState(1);
+  const [brushRadius, setBrushRadius] = useState(14);
+  const [calibrateTarget, setCalibrateTarget] = useState(null);
+  const [calibratedSamples, setCalibratedSamples] = useState({});
+  const [exporting, setExporting] = useState(false);
+
+  const grayColor = {
+    r: parseInt(grayColorHex.slice(1, 3), 16),
+    g: parseInt(grayColorHex.slice(3, 5), 16),
+    b: parseInt(grayColorHex.slice(5, 7), 16),
+  };
+
+  function isKept(lab) {
+    if (!lab) return true;
+    const v = st.keep.get(lab);
+    return v === undefined ? true : v;
+  }
+
+  function computeDesatBuffer() {
+    const orig = st.workOriginal.data;
+    const out = new Uint8ClampedArray(orig.length);
+    const amt = desatPct / 100;
+    const { r: tr, g: tg, b: tb } = grayColor;
+    for (let i = 0; i < orig.length; i += 4) {
+      out[i] = orig[i] + (tr - orig[i]) * amt;
+      out[i + 1] = orig[i + 1] + (tg - orig[i + 1]) * amt;
+      out[i + 2] = orig[i + 2] + (tb - orig[i + 2]) * amt;
+      out[i + 3] = orig[i + 3];
+    }
+    st.desatBuffer = out; st.desatBufferPct = desatPct; st.desatBufferColor = grayColorHex;
+  }
+  function getDesatBuffer() {
+    if (!st.desatBuffer || st.desatBufferPct !== desatPct || st.desatBufferColor !== grayColorHex) computeDesatBuffer();
+    return st.desatBuffer;
+  }
+
+  // 邊界標示遮罩：只標出「真正被判定為框線/未知、且緊鄰某個偵測到的色塊」的像
+  // 素，用來畫細線提示；不會包含大片背景，避免整張圖被塗滿
+  function computeBoundaryMask() {
+    const w = st.workW, h = st.workH, n = w * h;
+    const lineRaw = st.lineMaskRaw, label = st.labelMask;
+    const boundary = new Uint8Array(n);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (!lineRaw[i]) continue;
+        let adj = false;
+        if (x > 0 && label[i - 1]) adj = true;
+        else if (x < w - 1 && label[i + 1]) adj = true;
+        else if (y > 0 && label[i - w]) adj = true;
+        else if (y < h - 1 && label[i + w]) adj = true;
+        boundary[i] = adj ? 1 : 0;
+      }
+    }
+    st.boundaryMask = boundary;
+  }
+
+  // 即時預覽合成：手動筆刷（如果有畫）優先權最高，其次是真正的黑色框線永遠維
+  // 持原圖，其餘依 resolvedLabelMask 所屬分組的灰階狀態決定
+  function renderPreview() {
+    const canvas = canvasRef.current;
+    if (!canvas || !st.workOriginal) return;
+    const ctx = canvas.getContext('2d');
+    const w = st.workW, h = st.workH;
+    const orig = st.workOriginal.data;
+    const desat = getDesatBuffer();
+    const blackOnly = st.blackOnlyMask;
+    const label = st.resolvedLabelMask;
+    const manual = st.manualOverride;
+    const boundary = st.boundaryMask;
+    const out = ctx.createImageData(w, h);
+    const od = out.data;
+    for (let i = 0; i < w * h; i++) {
+      const k = i * 4;
+      const override = manual ? manual[i] : 0;
+      const keepOriginal = override === -1 ? true : override === 1 ? false : (blackOnly[i] === 1 || isKept(label[i]));
+      if (keepOriginal) { od[k] = orig[k]; od[k + 1] = orig[k + 1]; od[k + 2] = orig[k + 2]; od[k + 3] = 255; }
+      else { od[k] = desat[k]; od[k + 1] = desat[k + 1]; od[k + 2] = desat[k + 2]; od[k + 3] = 255; }
+      if (showLineMask && boundary && boundary[i]) {
+        const a = 0.55;
+        od[k] = od[k] * (1 - a) + 0 * a;
+        od[k + 1] = od[k + 1] * (1 - a) + 229 * a;
+        od[k + 2] = od[k + 2] * (1 - a) + 255 * a;
+      }
+    }
+    ctx.putImageData(out, 0, 0);
+  }
+
+  function computeSegmentation() {
+    const w = st.workW, h = st.workH;
+    const { rawLine, segLine, blackOnly } = grayBuildLineMask(st.workOriginal.data, w, h, colorTransitionMode, st.vBlack, st.sWhite, st.colorRanges);
+    st.lineMaskRaw = rawLine;
+    st.blackOnlyMask = blackOnly;
+    const seg = grayFloodFillLabel(segLine, w, h, GRAY_MIN_AREA_FRAC, GRAY_MAX_AREA_FRAC);
+    st.labelMask = seg.label;
+    st.resolvedLabelMask = grayResolveUnknownLabels(rawLine, blackOnly, seg.label, w, h);
+    st.keep = new Map();
+    computeBoundaryMask();
+    setRegionCount(seg.count);
+    setStatusMsg(seg.count > 0
+      ? `已自動辨識到 ${seg.count} 個色塊。直接點擊照片上想降低彩度的格子即可，再點一次可還原。`
+      : '沒有辨識到任何色塊，這張照片的顏色可能跟標準方塊色差異較大，或角度太極端，可以改用手動筆刷直接塗。');
+    renderPreview();
+  }
+
+  function buildAnalysis(img) {
+    st.img = img; st.natW = img.naturalWidth; st.natH = img.naturalHeight;
+    const maxDim = 1400;
+    let workScale = maxDim / Math.max(st.natW, st.natH);
+    workScale = Math.min(workScale, 1.6);
+    st.workW = Math.max(1, Math.round(st.natW * workScale));
+    st.workH = Math.max(1, Math.round(st.natH * workScale));
+
+    const wc = document.createElement('canvas');
+    wc.width = st.workW; wc.height = st.workH;
+    const wctx = wc.getContext('2d', { willReadFrequently: true });
+    wctx.drawImage(st.img, 0, 0, st.workW, st.workH);
+    st.workOriginal = wctx.getImageData(0, 0, st.workW, st.workH);
+    st.desatBuffer = null; st.desatBufferPct = null;
+    st.manualOverride = new Int8Array(st.workW * st.workH);
+
+    const canvas = canvasRef.current;
+    canvas.width = st.workW; canvas.height = st.workH;
+
+    setHasImage(true);
+    computeSegmentation();
+  }
+
+  function loadImageFile(file) {
+    setFileName(file.name);
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      setStatusMsg('照片已載入，正在依方塊六色色票自動辨識格線與色塊…');
+      setTimeout(() => { buildAnalysis(img); URL.revokeObjectURL(url); }, 10);
+    };
+    img.src = url;
+  }
+  function handleFileChange(e) { const file = e.target.files[0]; if (file) loadImageFile(file); }
+  function handleDrop(e) {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (file && file.type.startsWith('image/')) loadImageFile(file);
+  }
+
+  function getCanvasPixel(e) {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX - rect.left) * (canvas.width / rect.width));
+    const y = Math.floor((e.clientY - rect.top) * (canvas.height / rect.height));
+    return { x, y };
+  }
+
+  // 滴管校色：取點擊位置周圍一小塊區域的顏色中位數，不是單一像素，避免踩到反
+  // 光造成的單點誤差
+  function sampleColorAt(cx, cy) {
+    const orig = st.workOriginal.data;
+    const w = st.workW, h = st.workH;
+    const radius = 5;
+    const rs = [], gsArr = [], bs = [];
+    for (let dy = -radius; dy <= radius; dy++) {
+      const yy = cy + dy; if (yy < 0 || yy >= h) continue;
+      for (let dx = -radius; dx <= radius; dx++) {
+        const xx = cx + dx; if (xx < 0 || xx >= w) continue;
+        const idx = (yy * w + xx) * 4;
+        rs.push(orig[idx]); gsArr.push(orig[idx + 1]); bs.push(orig[idx + 2]);
+      }
+    }
+    const r = grayMedian(rs), g = grayMedian(gsArr), b = grayMedian(bs);
+    const target = calibrateTarget;
+    const { v, s, h: hue } = grayRgbToHsv(r, g, b);
+    if (target === 'black') st.vBlack = Math.min(0.55, v + 0.10);
+    else if (target === 'white') st.sWhite = Math.max(0.08, s + 0.06);
+    else { st.hues = { ...st.hues, [target]: hue }; st.colorRanges = grayBuildContiguousRanges(st.hues); }
+    setCalibratedSamples((prev) => ({ ...prev, [target]: `rgb(${r},${g},${b})` }));
+    setCalibrateTarget(null);
+    computeSegmentation();
+  }
+
+  function stampBrush(cx, cy) {
+    const w = st.workW, h = st.workH;
+    const r = brushRadius, r2 = r * r;
+    const force = brushForce;
+    const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(w - 1, Math.ceil(cx + r));
+    const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(h - 1, Math.ceil(cy + r));
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const dx = x - cx, dy = y - cy;
+        if (dx * dx + dy * dy <= r2) st.manualOverride[y * w + x] = force;
+      }
+    }
+  }
+  function paintStroke(from, to) {
+    const dx = to.x - from.x, dy = to.y - from.y;
+    const dist = Math.hypot(dx, dy);
+    const step = Math.max(1, brushRadius / 3);
+    const steps = Math.max(1, Math.ceil(dist / step));
+    for (let i = 0; i <= steps; i++) stampBrush(from.x + (dx * i) / steps, from.y + (dy * i) / steps);
+  }
+
+  function handlePointerDown(e) {
+    if (!hasImage) return;
+    const { x, y } = getCanvasPixel(e);
+    if (x < 0 || y < 0 || x >= st.workW || y >= st.workH) return;
+
+    if (calibrateTarget) { sampleColorAt(x, y); return; }
+
+    if (brushMode) {
+      paintingRef.current = true;
+      lastPaintPointRef.current = { x, y };
+      stampBrush(x, y);
+      renderPreview();
+      return;
+    }
+
+    if (!st.resolvedLabelMask) return;
+    const lab = st.resolvedLabelMask[y * st.workW + x];
+    if (!lab) {
+      setStatusMsg('這個位置沒有辨識到獨立色塊（可能是黑色框線、或面積太小／太大被自動排除），請點色塊中間位置，或改用「手動筆刷」直接塗。');
+      return;
+    }
+    const cur = isKept(lab);
+    st.keep.set(lab, !cur);
+    renderPreview();
+  }
+  function handlePointerMove(e) {
+    if (!paintingRef.current) return;
+    const { x, y } = getCanvasPixel(e);
+    const cx = Math.max(0, Math.min(st.workW - 1, x));
+    const cy = Math.max(0, Math.min(st.workH - 1, y));
+    paintStroke(lastPaintPointRef.current, { x: cx, y: cy });
+    lastPaintPointRef.current = { x: cx, y: cy };
+    renderPreview();
+  }
+  function handlePointerUp() { paintingRef.current = false; lastPaintPointRef.current = null; }
+
+  useEffect(() => { if (hasImage) renderPreview(); }, [desatPct, grayColorHex, showLineMask]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (hasImage) computeSegmentation(); }, [colorTransitionMode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 把預覽解析度的手動筆刷遮罩，用最近鄰放大成原生解析度。筆刷只是使用者畫的
+  // 一塊遮罩，不是語意分割結果，直接照座標比例放大取樣即可
+  function scaleManualOverrideToNative(natW, natH) {
+    const manual = st.manualOverride;
+    if (!manual) return null;
+    let hasAny = false;
+    for (let i = 0; i < manual.length; i++) if (manual[i]) { hasAny = true; break; }
+    if (!hasAny) return null;
+    const workW = st.workW, workH = st.workH;
+    const out = new Int8Array(natW * natH);
+    for (let y = 0; y < natH; y++) {
+      const wy = Math.min(workH - 1, Math.floor((y * workH) / natH));
+      const rowBase = y * natW, wRowBase = wy * workW;
+      for (let x = 0; x < natW; x++) {
+        const wx = Math.min(workW - 1, Math.floor((x * workW) / natW));
+        out[rowBase + x] = manual[wRowBase + wx];
+      }
+    }
+    return out;
+  }
+
+  // 匯出：在「原生解析度」重新做一次完整的框線偵測＋連通區塊分割（不是把預覽
+  // 用的低解析度分割結果直接放大貼上去），這樣格線邊緣才會貼合原始照片、不會
+  // 出現鋸齒毛邊。因為是重新分割，原生解析度的區塊編號跟預覽時不會一樣，用每
+  // 個原生區塊的中心點換算回預覽解析度，查出使用者點過哪一塊、有沒有被保留。
+  function doExport() {
+    const natW = st.natW, natH = st.natH;
+    const off = document.createElement('canvas');
+    off.width = natW; off.height = natH;
+    const octx = off.getContext('2d');
+    octx.drawImage(st.img, 0, 0, natW, natH);
+    const origData = octx.getImageData(0, 0, natW, natH);
+    const orig = origData.data;
+
+    const { rawLine: isLineNative, segLine, blackOnly: blackOnlyNative } = grayBuildLineMask(orig, natW, natH, colorTransitionMode, st.vBlack, st.sWhite, st.colorRanges);
+    const seg = grayFloodFillLabel(segLine, natW, natH, GRAY_MIN_AREA_FRAC, GRAY_MAX_AREA_FRAC);
+    const resolvedNative = grayResolveUnknownLabels(isLineNative, blackOnlyNative, seg.label, natW, natH);
+
+    const workW = st.workW, workH = st.workH, workLabel = st.labelMask;
+    const nativeToWork = new Int32Array(seg.numLabels);
+    for (let l = 1; l < seg.numLabels; l++) {
+      const wx = Math.min(workW - 1, Math.max(0, Math.round((seg.centroidX[l] * workW) / natW)));
+      const wy = Math.min(workH - 1, Math.max(0, Math.round((seg.centroidY[l] * workH) / natH)));
+      nativeToWork[l] = workLabel[wy * workW + wx];
+    }
+
+    const manualNative = scaleManualOverrideToNative(natW, natH);
+
+    const out = octx.createImageData(natW, natH);
+    const od = out.data;
+    const amt = desatPct / 100;
+    const { r: tr, g: tg, b: tb } = grayColor;
+    const n = natW * natH;
+
+    for (let i = 0; i < n; i++) {
+      const idx = i * 4;
+      const r = orig[idx], g = orig[idx + 1], b = orig[idx + 2];
+      const override = manualNative ? manualNative[i] : 0;
+      let keepOriginal;
+      if (override === -1) keepOriginal = true;
+      else if (override === 1) keepOriginal = false;
+      else if (blackOnlyNative[i]) keepOriginal = true;
+      else {
+        const nlab = resolvedNative[i];
+        const wlab = nlab ? nativeToWork[nlab] : 0;
+        keepOriginal = isKept(wlab);
+      }
+      if (keepOriginal) {
+        od[idx] = r; od[idx + 1] = g; od[idx + 2] = b; od[idx + 3] = orig[idx + 3];
+      } else {
+        od[idx] = r + (tr - r) * amt;
+        od[idx + 1] = g + (tg - g) * amt;
+        od[idx + 2] = b + (tb - b) * amt;
+        od[idx + 3] = orig[idx + 3];
+      }
+    }
+    octx.putImageData(out, 0, 0);
+    off.toBlob((blob) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'rubik-grayscale-' + Date.now() + '.png';
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      setStatusMsg('已下載完成。可以繼續點擊照片調整，或上傳下一張照片。');
+      setExporting(false);
+    }, 'image/png');
+  }
+  function handleExportClick() {
+    if (!hasImage) return;
+    setExporting(true);
+    setStatusMsg('正在以原始解析度重新辨識並產生圖片，請稍候…');
+    setTimeout(doExport, 10);
+  }
+
+  function handleCalibClick(target) {
+    setCalibrateTarget((prev) => (prev === target ? null : target));
+  }
+  function handleResetCalib() {
+    st.vBlack = GRAY_V_BLACK_DEFAULT;
+    st.sWhite = GRAY_S_WHITE_DEFAULT;
+    st.hues = { ...GRAY_HUES_DEFAULT };
+    st.colorRanges = GRAY_COLOR_RANGES_DEFAULT;
+    setCalibratedSamples({});
+    setCalibrateTarget(null);
+    if (hasImage) computeSegmentation();
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between flex-wrap gap-3 mb-1">
+        <h1 style={{ fontFamily: "'Orbitron', sans-serif" }} className="text-3xl font-black text-[var(--fg)] uppercase tracking-widest">
+          灰階降彩度工具
+        </h1>
+      </div>
+      <p className="text-[var(--mutedFg)] text-base mb-6">
+        上傳魔術方塊照片，系統自動偵測格線並切成一格一格，點擊想降低彩度的格子即可，處理完直接下載。
+      </p>
+
+      <div className="flex flex-col lg:flex-row gap-6">
+        <div className="flex-1 min-w-0">
+          <div
+            className="bg-black border border-[var(--border)] cyber-chamfer flex items-center justify-center overflow-auto"
+            style={{ minHeight: 360 }}
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={handleDrop}
+          >
+            {!hasImage && (
+              <p className="text-[var(--mutedFg)] text-base py-16 px-6 text-center">尚未上傳照片，拖放照片到這裡，或用右側「上傳照片」選擇檔案</p>
+            )}
+            <canvas
+              ref={canvasRef}
+              width={10}
+              height={10}
+              className={`max-w-full h-auto ${hasImage ? '' : 'hidden'} ${brushMode ? 'cursor-crosshair' : calibrateTarget ? 'cursor-copy' : 'cursor-pointer'}`}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerLeave={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+            />
+          </div>
+        </div>
+
+        <div className="w-full lg:w-96 shrink-0 space-y-4">
+          <div className="bg-[var(--card)] border border-[var(--border)] cyber-chamfer p-4">
+            <h3 className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-2">01 · 上傳照片</h3>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleFileChange}
+              className="w-full text-sm text-[var(--fg)]"
+            />
+            {fileName && <p className="text-sm text-[var(--mutedFg)] mt-1 truncate">{fileName}</p>}
+          </div>
+
+          <div className={`border cyber-chamfer p-4 text-sm font-medium leading-relaxed ${regionCount > 0 ? 'bg-[#00ff88]/10 border-[#00ff88]/50 text-[var(--fg)]' : 'bg-[var(--muted)] border-[var(--border)] text-[var(--mutedFg)]'}`}>
+            {statusMsg}
+          </div>
+
+          <div className="bg-[var(--card)] border border-[var(--border)] cyber-chamfer p-4">
+            <h3 className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-2">02 · 格線辨識</h3>
+            <label className="flex items-center gap-2 text-sm text-[var(--fg)] cursor-pointer mb-2">
+              <input type="checkbox" checked={showLineMask} onChange={(e) => setShowLineMask(e.target.checked)} />
+              用細線標示目前辨識到的格線位置
+            </label>
+            <label className="flex items-center gap-2 text-sm text-[var(--fg)] cursor-pointer">
+              <input type="checkbox" checked={colorTransitionMode} onChange={(e) => setColorTransitionMode(e.target.checked)} />
+              顏色交界輔助偵測（無貼紙方塊、黑框被光線洗淡時建議開啟）
+            </label>
+          </div>
+
+          <div className="bg-[var(--card)] border border-[var(--border)] cyber-chamfer p-4">
+            <h3 className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-2 flex items-center gap-1.5">
+              <Pipette className="w-3.5 h-3.5" /> 03 · 顏色校準（選填）
+            </h3>
+            <p className="text-sm text-[var(--mutedFg)] mb-3">光線特殊、跟標準色差比較多時，點下面的顏色，再點照片上對應的貼紙取樣。</p>
+            <div className="flex flex-wrap gap-2 mb-3">
+              {Object.keys(GRAY_CALIB_LABEL).map((target) => (
+                <button
+                  key={target}
+                  onClick={() => handleCalibClick(target)}
+                  className={`text-sm font-mono px-3 py-1.5 cyber-chamfer-sm border-2 transition ${
+                    calibrateTarget === target ? 'border-[#ffee00] shadow-[0_0_8px_#ffee0080]' : 'border-[var(--border)]'
+                  }`}
+                  style={{ background: GRAY_SWATCH_BG[target], color: GRAY_SWATCH_FG[target] }}
+                >
+                  {GRAY_CALIB_LABEL[target]}
+                </button>
+              ))}
+            </div>
+            <p className="text-sm text-[var(--mutedFg)] mb-2">
+              {Object.keys(calibratedSamples).length === 0
+                ? '尚未校準任何顏色，目前使用系統標準值。'
+                : '已校準：' + Object.keys(calibratedSamples).map((k) => GRAY_CALIB_LABEL[k]).join('、')}
+            </p>
+            <button
+              onClick={handleResetCalib}
+              className="w-full text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
+            >
+              重設為系統標準色
+            </button>
+          </div>
+
+          <div className="bg-[var(--card)] border border-[var(--border)] cyber-chamfer p-4">
+            <h3 className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-2">04 · 降低彩度</h3>
+            <div className="flex items-center gap-2 mb-3">
+              <label className="text-sm text-[var(--mutedFg)]">統一灰階顏色</label>
+              <input type="color" value={grayColorHex} onChange={(e) => setGrayColorHex(e.target.value)} className="w-9 h-7 border border-[var(--border)] bg-transparent cursor-pointer" />
+            </div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-sm text-[var(--mutedFg)]">降低彩度強度</label>
+              <span className="text-sm font-mono text-[var(--accentText)]">{desatPct}%</span>
+            </div>
+            <input type="range" min="0" max="100" value={desatPct} onChange={(e) => setDesatPct(parseInt(e.target.value))} className="w-full accent-[#00ff88]" />
+            <button
+              onClick={() => { st.keep = new Map(); renderPreview(); }}
+              className="w-full mt-3 text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
+            >
+              全部還原成原圖
+            </button>
+          </div>
+
+          <div className="bg-[var(--card)] border border-[var(--border)] cyber-chamfer p-4">
+            <h3 className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-2 flex items-center gap-1.5">
+              <Paintbrush className="w-3.5 h-3.5" /> 05 · 手動筆刷修正
+            </h3>
+            <label className="flex items-center gap-2 text-sm text-[var(--fg)] cursor-pointer mb-3">
+              <input type="checkbox" checked={brushMode} onChange={(e) => setBrushMode(e.target.checked)} />
+              開啟手動筆刷（開啟後點擊/拖曳照片＝塗筆刷，不是切換色塊）
+            </label>
+            {brushMode && (
+              <>
+                <div className="flex gap-2 mb-3">
+                  <button
+                    onClick={() => setBrushForce(1)}
+                    className={`flex-1 text-sm font-mono uppercase tracking-wider px-3 py-1.5 cyber-chamfer-sm border-2 transition ${
+                      brushForce === 1 ? 'border-[#00ff88] bg-[#00ff88] text-[#0a0a0f]' : 'border-[var(--border)] text-[var(--fg)]'
+                    }`}
+                  >
+                    塗灰
+                  </button>
+                  <button
+                    onClick={() => setBrushForce(-1)}
+                    className={`flex-1 text-sm font-mono uppercase tracking-wider px-3 py-1.5 cyber-chamfer-sm border-2 transition ${
+                      brushForce === -1 ? 'border-[#00ff88] bg-[#00ff88] text-[#0a0a0f]' : 'border-[var(--border)] text-[var(--fg)]'
+                    }`}
+                  >
+                    還原原圖
+                  </button>
+                </div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-sm text-[var(--mutedFg)]">筆刷大小</label>
+                  <span className="text-sm font-mono text-[var(--accentText)]">{brushRadius}px</span>
+                </div>
+                <input type="range" min="3" max="60" value={brushRadius} onChange={(e) => setBrushRadius(parseInt(e.target.value))} className="w-full accent-[#00ff88] mb-3" />
+                <button
+                  onClick={() => { if (st.manualOverride) st.manualOverride.fill(0); renderPreview(); }}
+                  className="w-full text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
+                >
+                  清除所有手動筆刷痕跡
+                </button>
+              </>
+            )}
+          </div>
+
+          <button
+            onClick={handleExportClick}
+            disabled={!hasImage || exporting}
+            className="w-full flex items-center justify-center gap-1.5 border-2 border-[#00ff88] text-[var(--accentText)] bg-transparent text-base font-mono uppercase tracking-wider px-4 py-3 cyber-chamfer hover:bg-[#00ff88] hover:text-[#0a0a0f] transition disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+            06 · 下載處理後圖片
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AdminDrawer({ allUsers, onSetRole, onClose, loading }) {
   const pending = allUsers.filter((u) => u.status && u.status !== 'approved');
   return (
@@ -2392,7 +3264,7 @@ function ProfileSetup({ mode, initialNickname, initialAvatarUrl, onSave, onCance
 }
 
 // Header：登入後常駐頂列，顯示頭貼＋暱稱，點擊進入 /profile 編輯頁
-function Header({ profile, session, role, onOpenAdmin, onOpenProfile, onLogout, logoError, onLogoError, onGoHome, hasUnseenActivity, onOpenNotif, onOpenAssign, onOpenInternalDocs, onOpenSchedule, hasPendingDesignTasks }) {
+function Header({ profile, session, role, onOpenAdmin, onOpenProfile, onLogout, logoError, onLogoError, onGoHome, hasUnseenActivity, onOpenNotif, onOpenAssign, onOpenInternalDocs, onOpenSchedule, hasPendingDesignTasks, onOpenGrayscale }) {
   const roleMeta = role ? ROLE_META[role] : null;
   return (
     <div className="sticky top-0 z-40 bg-[var(--bg)]/95 backdrop-blur border-b border-[#00ff88]/40 shadow-[0_1px_10px_rgba(0,255,136,0.25)]">
@@ -2467,6 +3339,14 @@ function Header({ profile, session, role, onOpenAdmin, onOpenProfile, onLogout, 
               {hasPendingDesignTasks && (
                 <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-[#ff3366] shadow-[0_0_5px_#ff3366]" />
               )}
+            </button>
+          )}
+          {role === 'designer' && (
+            <button
+              onClick={onOpenGrayscale}
+              className="flex items-center gap-1.5 text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
+            >
+              <Contrast className="w-3.5 h-3.5" /> 灰階工具
             </button>
           )}
           {role === 'admin' && (
@@ -3370,6 +4250,7 @@ export default function App() {
           onOpenInternalDocs={() => { fetchInternalDocs(); fetchInternalDocComments(); setShowInternalDocsPanel(true); }}
           onOpenSchedule={() => { setView('schedule'); fetchDesignTasks(); if (role === 'admin') fetchAllProfiles(); }}
           hasPendingDesignTasks={hasPendingDesignTasks}
+          onOpenGrayscale={() => setView('grayscale')}
         />
         <ProfileSetup
           mode="edit"
@@ -3408,6 +4289,7 @@ export default function App() {
         onOpenInternalDocs={() => { fetchInternalDocs(); fetchInternalDocComments(); setShowInternalDocsPanel(true); }}
         onOpenSchedule={() => { setView('schedule'); fetchDesignTasks(); if (role === 'admin') fetchAllProfiles(); }}
         hasPendingDesignTasks={hasPendingDesignTasks}
+        onOpenGrayscale={() => setView('grayscale')}
       />
 
       <main className="max-w-7xl mx-auto px-6 py-8">
@@ -3424,6 +4306,8 @@ export default function App() {
             resolveAuthorName={resolveAuthorName}
           />
         )}
+
+        {view === 'grayscale' && role === 'designer' && <GrayscaleTool />}
 
         {view === 'dashboard' && (
           <div>
