@@ -1839,26 +1839,14 @@ const GRAY_CALIB_LABEL = { black: '黑框', white: '白', yellow: '黃', red: '�
 const GRAY_SWATCH_BG = { black: '#1a1a1a', white: '#ffffff', yellow: '#F0C020', red: '#D02020', orange: '#e6820c', blue: '#1040C0', green: '#1e8449' };
 const GRAY_SWATCH_FG = { black: '#fff', white: '#111', yellow: '#111', red: '#fff', orange: '#fff', blue: '#fff', green: '#fff' };
 
-function grayCircularMidpoint(a, b) {
-  let diff = b - a; if (diff < 0) diff += 360;
-  let mid = a + diff / 2; if (mid >= 360) mid -= 360;
-  return mid;
-}
-function grayBuildContiguousRanges(hueMap) {
-  const entries = Object.keys(hueMap).map((name) => ({ name, h: ((hueMap[name] % 360) + 360) % 360 }));
-  entries.sort((a, b) => a.h - b.h);
-  const k = entries.length;
-  const ranges = [];
-  for (let i = 0; i < k; i++) {
-    const prev = entries[(i - 1 + k) % k], cur = entries[i], next = entries[(i + 1) % k];
-    const lo = grayCircularMidpoint(prev.h, cur.h);
-    const hi = grayCircularMidpoint(cur.h, next.h);
-    ranges.push(lo < hi ? [cur.name, [[lo, hi]]] : [cur.name, [[lo, 360], [0, hi]]]);
-  }
-  return ranges;
-}
-const GRAY_COLOR_RANGES_DEFAULT = grayBuildContiguousRanges(GRAY_HUES_DEFAULT);
 const GRAY_CLASS_CODE = { black: 0, white: 1, red: 2, orange: 3, yellow: 4, green: 5, blue: 6, unknown: 7 };
+
+// 每個顏色各自獨立一個 ±GRAY_HUE_WINDOW 度的接受窗，picked by "離中心最近"，而
+// 不是像舊版那樣把整個色相環依中點切成互相緊鄰、無縫隙的區塊。舊版的問題：校準
+// 一個顏色會牽動它兩側鄰居的邊界（因為邊界＝跟鄰居的中點），使用者只想修正「紅」
+// 結果連沒動過的「橘」「藍」判斷範圍都跟著跑掉，滴管校色偶爾「越校越糟」的原因
+// 就在這裡。獨立窗之間互不相依，校一個顏色只會動到那個顏色自己的範圍。
+const GRAY_HUE_WINDOW = 32;
 
 // r,g,b（0~255）→ { v, s, h }，v/s 是 0~1，h 是 0~360 度。分類與滴管校色共用同一套
 // 換算，確保「這一小塊區域實際的顏色」跟「拿去比對的色相表」算的是同一件事。
@@ -1878,18 +1866,22 @@ function grayRgbToHsv(r, g, b) {
   return { v, s, h };
 }
 
+function grayHueDist(a, b) {
+  let d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
+}
+
 // 回傳: 'black' | 'white' | 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'unknown'
-function grayClassifyPixel(r, g, b, vBlack, sWhite, colorRanges) {
+function grayClassifyPixel(r, g, b, vBlack, sWhite, hues) {
   const { v: V, s: S, h } = grayRgbToHsv(r, g, b);
   if (V < vBlack) return 'black';
   if (S < sWhite) return 'white';
-  for (let ci = 0; ci < colorRanges.length; ci++) {
-    const ranges = colorRanges[ci][1];
-    for (let ri = 0; ri < ranges.length; ri++) {
-      if (h >= ranges[ri][0] && h < ranges[ri][1]) return colorRanges[ci][0];
-    }
+  let best = null, bestDist = Infinity;
+  for (const name in hues) {
+    const d = grayHueDist(h, hues[name]);
+    if (d <= GRAY_HUE_WINDOW && d < bestDist) { bestDist = d; best = name; }
   }
-  return 'unknown'; // 理論上涵蓋整個色相環，這裡只是安全網
+  return best || 'unknown'; // 落在所有顏色窗之外，當作雜訊／背景
 }
 
 // 影像前處理：高斯模糊（僅用於「判斷用」的色彩分類，不影響輸出的實際像素顏色），
@@ -2053,13 +2045,40 @@ function grayBuildColorTransitionMask(classCodes, w, h) {
   return trans;
 }
 
+// 局部反差輔助偵測：金屬／鏡面方塊常常整顆都是同一種銀灰色，貼紙彼此之間完全
+// 沒有色相差異，黑色偵測、顏色交界偵測兩個都是靠「顏色不一樣」在判斷，遇到這
+// 種「顏色其實都一樣、只有明暗反光角度不同」的方塊一樣會全部失效。這裡改用不
+// 管顏色分類、純粹看「這個像素跟旁邊亮度差多少」的 Sobel 梯度：格線本身即使跟
+// 貼紙同色，物理上還是一條真實的凹槽，光線角度一定跟平面不同，亮度梯度會在那
+// 裡出現尖峰，這是唯一不依賴色相判斷的訊號，所以獨立於黑色/顏色交界之外。
+function grayBuildEdgeMask(data, w, h, threshold) {
+  const n = w * h;
+  const lum = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const k = i * 4;
+    lum[i] = 0.299 * data[k] + 0.587 * data[k + 1] + 0.114 * data[k + 2];
+  }
+  const edge = new Uint8Array(n);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const gx = lum[i - w - 1] + 2 * lum[i - 1] + lum[i + w - 1] - (lum[i - w + 1] + 2 * lum[i + 1] + lum[i + w + 1]);
+      const gy = lum[i - w - 1] + 2 * lum[i - w] + lum[i - w + 1] - (lum[i + w - 1] + 2 * lum[i + w] + lum[i + w + 1]);
+      if (Math.sqrt(gx * gx + gy * gy) > threshold) edge[i] = 1;
+    }
+  }
+  return edge;
+}
+const GRAY_EDGE_THRESHOLD = 55;
+
 // 建立框線遮罩，回傳三份：
-//   rawLine — 黑色框線 + 無法辨識（+ 顏色交界，若開啟）合併後的原始分類結果，
-//     渲染／匯出時用來保證「非真正黑色」的部分不會被永久鎖住不能降低彩度。
+//   rawLine — 黑色框線 + 無法辨識 +（若開啟輔助偵測）顏色交界／局部反差，合併
+//     後的原始分類結果，渲染／匯出時用來保證「非真正黑色」的部分不會被永久鎖
+//     住不能降低彩度。
 //   segLine — 在 rawLine 基礎上清除孤立雜訊、補小缺口，只用來做連通區塊分割。
 //   blackOnly — 只有真的判定成黑色框線的像素，渲染／匯出時唯一「保證永遠維持
 //     原圖」的依據。
-function grayBuildLineMask(data, w, h, useColorTransition, vBlack, sWhite, colorRanges) {
+function grayBuildLineMask(data, w, h, useAuxDetection, vBlack, sWhite, hues) {
   const n = w * h;
   const blurred = grayGaussianBlur(data, w, h);
   const rawLine = new Uint8Array(n);
@@ -2067,14 +2086,15 @@ function grayBuildLineMask(data, w, h, useColorTransition, vBlack, sWhite, color
   const classCodes = new Uint8Array(n);
   for (let i = 0; i < n; i++) {
     const bi = i * 3;
-    const cls = grayClassifyPixel(blurred[bi], blurred[bi + 1], blurred[bi + 2], vBlack, sWhite, colorRanges);
+    const cls = grayClassifyPixel(blurred[bi], blurred[bi + 1], blurred[bi + 2], vBlack, sWhite, hues);
     classCodes[i] = GRAY_CLASS_CODE[cls];
     rawLine[i] = (cls === 'black' || cls === 'unknown') ? 1 : 0;
     blackOnly[i] = cls === 'black' ? 1 : 0;
   }
-  if (useColorTransition) {
+  if (useAuxDetection) {
     const trans = grayBuildColorTransitionMask(classCodes, w, h);
-    for (let i = 0; i < n; i++) if (trans[i]) rawLine[i] = 1;
+    const edge = grayBuildEdgeMask(data, w, h, GRAY_EDGE_THRESHOLD);
+    for (let i = 0; i < n; i++) if (trans[i] || edge[i]) rawLine[i] = 1;
   }
   let segLine = rawLine.slice();
   const minIsland = Math.max(4, Math.round(n * 0.000003));
@@ -2163,7 +2183,7 @@ function GrayscaleTool() {
     desatBuffer: null, desatBufferPct: null, desatBufferColor: null,
     labelMask: null, resolvedLabelMask: null, keep: new Map(), manualOverride: null,
     vBlack: GRAY_V_BLACK_DEFAULT, sWhite: GRAY_S_WHITE_DEFAULT,
-    hues: { ...GRAY_HUES_DEFAULT }, colorRanges: GRAY_COLOR_RANGES_DEFAULT,
+    hues: { ...GRAY_HUES_DEFAULT },
   });
   const st = stRef.current;
 
@@ -2266,7 +2286,7 @@ function GrayscaleTool() {
 
   function computeSegmentation() {
     const w = st.workW, h = st.workH;
-    const { rawLine, segLine, blackOnly } = grayBuildLineMask(st.workOriginal.data, w, h, colorTransitionMode, st.vBlack, st.sWhite, st.colorRanges);
+    const { rawLine, segLine, blackOnly } = grayBuildLineMask(st.workOriginal.data, w, h, colorTransitionMode, st.vBlack, st.sWhite, st.hues);
     st.lineMaskRaw = rawLine;
     st.blackOnlyMask = blackOnly;
     const seg = grayFloodFillLabel(segLine, w, h, GRAY_MIN_AREA_FRAC, GRAY_MAX_AREA_FRAC);
@@ -2347,9 +2367,12 @@ function GrayscaleTool() {
     const r = grayMedian(rs), g = grayMedian(gsArr), b = grayMedian(bs);
     const target = calibrateTarget;
     const { v, s, h: hue } = grayRgbToHsv(r, g, b);
-    if (target === 'black') st.vBlack = Math.min(0.55, v + 0.10);
-    else if (target === 'white') st.sWhite = Math.max(0.08, s + 0.06);
-    else { st.hues = { ...st.hues, [target]: hue }; st.colorRanges = grayBuildContiguousRanges(st.hues); }
+    // 黑/白的門檻上限刻意壓低：取樣點如果不小心點到比真正黑框亮一點的地方，
+    // 門檻頂多墊高到這裡就停，不會把大片有顏色的貼紙也一起吃進「黑」或「白」，
+    // 這是滴管校色「越校越糟」最常見的成因
+    if (target === 'black') st.vBlack = Math.min(0.45, Math.max(0.15, v + 0.08));
+    else if (target === 'white') st.sWhite = Math.min(0.35, Math.max(0.08, s + 0.05));
+    else { st.hues = { ...st.hues, [target]: hue }; }
     setCalibratedSamples((prev) => ({ ...prev, [target]: `rgb(${r},${g},${b})` }));
     setCalibrateTarget(null);
     computeSegmentation();
@@ -2449,7 +2472,7 @@ function GrayscaleTool() {
     const origData = octx.getImageData(0, 0, natW, natH);
     const orig = origData.data;
 
-    const { rawLine: isLineNative, segLine, blackOnly: blackOnlyNative } = grayBuildLineMask(orig, natW, natH, colorTransitionMode, st.vBlack, st.sWhite, st.colorRanges);
+    const { rawLine: isLineNative, segLine, blackOnly: blackOnlyNative } = grayBuildLineMask(orig, natW, natH, colorTransitionMode, st.vBlack, st.sWhite, st.hues);
     const seg = grayFloodFillLabel(segLine, natW, natH, GRAY_MIN_AREA_FRAC, GRAY_MAX_AREA_FRAC);
     const resolvedNative = grayResolveUnknownLabels(isLineNative, blackOnlyNative, seg.label, natW, natH);
 
@@ -2516,7 +2539,6 @@ function GrayscaleTool() {
     st.vBlack = GRAY_V_BLACK_DEFAULT;
     st.sWhite = GRAY_S_WHITE_DEFAULT;
     st.hues = { ...GRAY_HUES_DEFAULT };
-    st.colorRanges = GRAY_COLOR_RANGES_DEFAULT;
     setCalibratedSamples({});
     setCalibrateTarget(null);
     if (hasImage) computeSegmentation();
@@ -2583,7 +2605,7 @@ function GrayscaleTool() {
             </label>
             <label className="flex items-center gap-2 text-sm text-[var(--fg)] cursor-pointer">
               <input type="checkbox" checked={colorTransitionMode} onChange={(e) => setColorTransitionMode(e.target.checked)} />
-              顏色交界輔助偵測（無貼紙方塊、黑框被光線洗淡時建議開啟）
+              輔助偵測：顏色交界＋局部反差（無貼紙方塊、金屬鏡面方塊、黑框被光線洗淡時建議開啟；黑框不再是唯一判斷依據）
             </label>
           </div>
 
