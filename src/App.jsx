@@ -1576,7 +1576,10 @@ function DesignTaskModal({ designers, cubeOptions, session, onClose, onSubmit })
     return () => { cancelled = true; };
   }, [form.task_type, form.cube_name]);
 
-  const selectedFile = cubeFiles.find((f) => f.category === form.file_category && f.id === form.file_id) || null;
+  // cube_drafts/cube_final 的 id 欄位不一定是字串型別（有些是 bigint 流水號），
+  // 但 form.file_id 是從 <select> 的 value 解析出來的一定是字串，兩邊型別不同時 === 永遠比對不到，
+  // 這裡統一轉成字串比較，避免「明明選了版本，頁碼區塊卻完全不顯示」的問題
+  const selectedFile = cubeFiles.find((f) => f.category === form.file_category && String(f.id) === String(form.file_id)) || null;
 
   const togglePage = (p) => {
     setForm((f) => ({ ...f, pages: f.pages.includes(p) ? f.pages.filter((x) => x !== p) : [...f.pages, p] }));
