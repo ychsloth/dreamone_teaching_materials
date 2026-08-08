@@ -487,7 +487,9 @@ export function GrayscaleTool() {
   const [regionCount, setRegionCount] = useState(0);
   const [statusMsg, setStatusMsg] = useState('請先上傳一張魔術方塊照片，系統會自動辨識這張照片實際的顏色與格線。');
   const [showLineMask, setShowLineMask] = useState(false);
-  const [auxDetectionMode, setAuxDetectionMode] = useState(true);
+  // 金屬／鏡面方塊貼紙彼此顏色太接近，光靠顏色分群常常抓不出格線，局部反差偵測
+  // 幾乎都有幫助、沒有明顯副作用，所以直接固定開啟，不用讓使用者自己選
+  const auxDetectionMode = true;
   const [desatPct, setDesatPct] = useState(100);
   const [grayColorHex, setGrayColorHex] = useState('#8c8c8c');
   const [brushMode, setBrushMode] = useState(false);
@@ -549,10 +551,9 @@ export function GrayscaleTool() {
   }
 
   // 即時預覽合成：手動筆刷（如果有畫）優先權最高、且是硬邊（使用者自己畫的範圍
-  // 就該照畫的來，不用羽化）；自動辨識的部分則用「離最近格線的距離」算出一個
-  // 0~1 的漸層權重（alpha）—— 緊貼格線的一小圈（EROSION_RADIUS 內）保證維持
-  // 原圖、絕對不會蓋到黑框，再往外到 FEATHER_WIDTH 之間才慢慢淡入灰階，邊緣才
-  // 不會出現鋸齒。
+  // 就該照畫的來）；自動辨識的部分則用「離最近格線的距離」算出 0 或 1 的權重
+  // （alpha）—— 緊貼格線的一小圈（EROSION_RADIUS 內）保證維持原圖、絕對不會蓋到
+  // 黑框，再往外一律直接變成完整灰階，不留原本顏色的殘影。
   function renderPreview() {
     const canvas = canvasRef.current;
     if (!canvas || !st.workOriginal) return;
@@ -576,7 +577,7 @@ export function GrayscaleTool() {
       else if (blackOnly[i] === 1) alpha = 0;
       else if (!isKept(label[i])) {
         const d = dist ? dist[i] : 255;
-        alpha = d <= GRAY_EROSION_RADIUS ? 0 : Math.min(1, (d - GRAY_EROSION_RADIUS) / GRAY_FEATHER_WIDTH);
+        alpha = d <= GRAY_EROSION_RADIUS ? 0 : 1;
       } else alpha = 0;
       od[k] = orig[k] + (desat[k] - orig[k]) * alpha;
       od[k + 1] = orig[k + 1] + (desat[k + 1] - orig[k + 1]) * alpha;
@@ -759,7 +760,6 @@ export function GrayscaleTool() {
   function handlePointerUp() { paintingRef.current = false; lastPaintPointRef.current = null; }
 
   useEffect(() => { if (hasImage) renderPreview(); }, [desatPct, grayColorHex, showLineMask]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { if (hasImage) rebuildFromClusters(); }, [auxDetectionMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 把預覽解析度的手動筆刷遮罩，用最近鄰放大成原生解析度。筆刷只是使用者畫的
   // 一塊遮罩，不是語意分割結果，直接照座標比例放大取樣即可
@@ -836,7 +836,7 @@ export function GrayscaleTool() {
         const wlab = nlab ? nativeToWork[nlab] : 0;
         if (!isKept(wlab)) {
           const d = distNative[i];
-          alpha = d <= erosionNative ? 0 : Math.min(1, (d - erosionNative) / featherNative);
+          alpha = d <= erosionNative ? 0 : 1;
         } else alpha = 0;
       }
       const gr = r + (tr - r) * amt, gg = g + (tg - g) * amt, gb = b + (tb - b) * amt;
@@ -919,13 +919,9 @@ export function GrayscaleTool() {
           <div className="bg-[var(--card)] border border-[var(--border)] cyber-chamfer p-4">
             <h3 className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-2">02 · 格線辨識</h3>
             <p className="text-sm text-[var(--mutedFg)] mb-2">系統會自動分析這張照片實際拍到的顏色來分組、找出格線，不用手動校色。</p>
-            <label className="flex items-center gap-2 text-sm text-[var(--fg)] cursor-pointer mb-2">
+            <label className="flex items-center gap-2 text-sm text-[var(--fg)] cursor-pointer">
               <input type="checkbox" checked={showLineMask} onChange={(e) => setShowLineMask(e.target.checked)} />
               用細線標示目前辨識到的格線位置
-            </label>
-            <label className="flex items-center gap-2 text-sm text-[var(--fg)] cursor-pointer">
-              <input type="checkbox" checked={auxDetectionMode} onChange={(e) => setAuxDetectionMode(e.target.checked)} />
-              局部反差輔助偵測（金屬／鏡面方塊、貼紙彼此顏色太接近時建議開啟）
             </label>
           </div>
 
