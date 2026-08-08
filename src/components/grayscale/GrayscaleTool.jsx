@@ -450,7 +450,7 @@ export function GrayscaleTool() {
   const stRef = useRef({
     img: null, natW: 0, natH: 0, workW: 0, workH: 0, workOriginal: null,
     clusterId: null, centroids: null, k: 0, borderClusterId: -1, borderManual: false,
-    lineMaskRaw: null, blackOnlyMask: null, boundaryMask: null,
+    lineMaskRaw: null, blackOnlyMask: null, boundaryMask: null, nearLineMask: null,
     desatBuffer: null, desatBufferPct: null, desatBufferColor: null,
     labelMask: null, resolvedLabelMask: null, keep: new Map(), manualOverride: null,
   });
@@ -525,8 +525,8 @@ export function GrayscaleTool() {
   }
 
   // 即時預覽合成：手動筆刷（如果有畫）優先權最高、且是硬邊（使用者自己畫的範圍
-  // 就該照畫的來）；黑色框線本身（blackOnly）永遠維持原圖，其餘只要是「沒被
-  // 使用者保留」的色塊一律直接變成完整灰階，不留原本顏色的殘影。
+  // 就該照畫的來）；黑色框線本身跟緊貼它 1px 的保護帶（nearLineMask）永遠維持
+  // 原圖，其餘只要是「沒被使用者保留」的色塊一律直接變成完整灰階。
   function renderPreview() {
     const canvas = canvasRef.current;
     if (!canvas || !st.workOriginal) return;
@@ -538,6 +538,7 @@ export function GrayscaleTool() {
     const label = st.resolvedLabelMask;
     const manual = st.manualOverride;
     const boundary = st.boundaryMask;
+    const nearLine = st.nearLineMask;
     const out = ctx.createImageData(w, h);
     const od = out.data;
     for (let i = 0; i < w * h; i++) {
@@ -547,7 +548,7 @@ export function GrayscaleTool() {
       if (override === -1) alpha = 0;
       else if (override === 1) alpha = 1;
       else if (blackOnly[i] === 1) alpha = 0;
-      else if (!isKept(label[i])) alpha = 1;
+      else if (!isKept(label[i])) alpha = (nearLine && nearLine[i]) ? 0 : 1;
       else alpha = 0;
       od[k] = orig[k] + (desat[k] - orig[k]) * alpha;
       od[k + 1] = orig[k + 1] + (desat[k + 1] - orig[k + 1]) * alpha;
@@ -572,6 +573,10 @@ export function GrayscaleTool() {
     const { rawLine, segLine, blackOnly } = grayBuildLineMaskFromClusters(st.clusterId, w, h, st.borderClusterId, edgeMask);
     st.lineMaskRaw = rawLine;
     st.blackOnlyMask = blackOnly;
+    // 緊貼格線往外恰好 1px 的保護帶：直接在目前這個解析度上做 1 次膨脹算出來，
+    // 不是拿工作解析度的距離值等比例放大，所以不會因為照片解析度變高就跟著變粗，
+    // 邊緣只會留一點點、不會出現明顯的顏色圈。
+    st.nearLineMask = grayMorphDilate(rawLine, w, h);
     const seg = grayFloodFillLabel(segLine, w, h, GRAY_MIN_AREA_FRAC, GRAY_MAX_AREA_FRAC);
     st.labelMask = seg.label;
     st.resolvedLabelMask = grayResolveUnknownLabels(rawLine, blackOnly, seg.label, w, h);
@@ -772,6 +777,9 @@ export function GrayscaleTool() {
     const { rawLine: isLineNative, segLine, blackOnly: blackOnlyNative } = grayBuildLineMaskFromClusters(nativeClusterId, natW, natH, st.borderClusterId, edgeMask);
     const seg = grayFloodFillLabel(segLine, natW, natH, GRAY_MIN_AREA_FRAC, GRAY_MAX_AREA_FRAC);
     const resolvedNative = grayResolveUnknownLabels(isLineNative, blackOnlyNative, seg.label, natW, natH);
+    // 跟預覽一樣，直接在原生解析度上做 1 次膨脹算保護帶，不會因為原生解析度比
+    // 工作解析度高很多而跟著等比例變粗。
+    const nearLineNative = grayMorphDilate(isLineNative, natW, natH);
 
     const workW = st.workW, workH = st.workH, workLabel = st.labelMask;
     const nativeToWork = new Int32Array(seg.numLabels);
@@ -799,7 +807,7 @@ export function GrayscaleTool() {
       else {
         const nlab = resolvedNative[i];
         const wlab = nlab ? nativeToWork[nlab] : 0;
-        alpha = !isKept(wlab) ? 1 : 0;
+        alpha = !isKept(wlab) ? (nearLineNative[i] ? 0 : 1) : 0;
       }
       const gr = r + (tr - r) * amt, gg = g + (tg - g) * amt, gb = b + (tb - b) * amt;
       od[idx] = r + (gr - r) * alpha;
