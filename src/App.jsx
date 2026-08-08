@@ -89,7 +89,7 @@ export default function App() {
       const { data, error } = await supabase.storage
         .from(STORAGE_BUCKET)
         .upload(fileName, file, {
-          cacheControl: '60',
+          cacheControl: '0',
           upsert: true,
         });
       if (error) throw error;

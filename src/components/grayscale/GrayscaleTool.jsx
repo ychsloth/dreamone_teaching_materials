@@ -26,14 +26,6 @@ export const GRAY_MAX_AREA_FRAC = 0.35;
 
 export const GRAY_EDGE_THRESHOLD = 55;
 
-// 灰階範圍會刻意比偵測到的格線邊界再往內縮一點：EROSION 是絕對不灰階的安全邊界
-// （保證灰階不會蓋到黑框本身），往外到 EROSION+FEATHER 之間用淡入淡出取代直接
-// 切一刀，邊緣才不會鋸齒；兩者都是「工作解析度」下的像素數，原生解析度匯出時
-// 會按照解析度比例放大。
-export const GRAY_EROSION_RADIUS = 1;
-
-export const GRAY_FEATHER_WIDTH = 2;
-
 
 // sRGB(0~255) → CIE Lab（D65 白點）。分兩步：先還原成線性光（sRGB 有 gamma
 // 編碼），再用標準矩陣轉 XYZ，最後轉 Lab。
@@ -379,53 +371,35 @@ export function grayBuildLineMaskFromClusters(clusterId, w, h, borderClusterId, 
 }
 
 
-// 多來源 BFS，算出每個像素離最近格線像素的距離（4方向、上限 maxDist）。降彩度
-// 合成時只信任「離格線夠遠」的像素，格線本身跟緊貼格線的一小圈永遠維持原圖，
-// 灰階範圍就不會蓋到黑框或交界線上，也不會因為單一像素誤判而產生鋸齒。
-export function grayDistanceToWall(rawLine, w, h, maxDist) {
-  const n = w * h;
-  const dist = new Uint8Array(n).fill(maxDist + 1);
-  const queue = new Int32Array(n);
-  let qHead = 0, qTail = 0;
-  for (let i = 0; i < n; i++) { if (rawLine[i]) { dist[i] = 0; queue[qTail++] = i; } }
-  while (qHead < qTail) {
-    const idx = queue[qHead++];
-    const d = dist[idx];
-    if (d >= maxDist) continue;
-    const x = idx % w, y = (idx / w) | 0;
-    const nd = d + 1;
-    if (x > 0 && dist[idx - 1] > nd) { dist[idx - 1] = nd; queue[qTail++] = idx - 1; }
-    if (x < w - 1 && dist[idx + 1] > nd) { dist[idx + 1] = nd; queue[qTail++] = idx + 1; }
-    if (y > 0 && dist[idx - w] > nd) { dist[idx - w] = nd; queue[qTail++] = idx - w; }
-    if (y < h - 1 && dist[idx + w] > nd) { dist[idx + w] = nd; queue[qTail++] = idx + w; }
-  }
-  return dist;
-}
-
-
 // 連通區塊分割（4方向flood fill），順便統計每塊的中心點座標，供匯出時把「原生
-// 解析度重新分割出的區塊」對應回使用者在預覽時點過的區塊
+// 解析度重新分割出的區塊」對應回使用者在預覽時點過的區塊。貼紙一定被格線/黑框
+// 完整包住、不會碰到照片最外緣；背景則幾乎一定會碰到照片邊界。所以除了面積篩選
+// 之外，只要區塊有任何一個像素落在照片最外圍一圈，就直接視為背景、永遠不算有效
+// 色塊——不然背景如果剛好面積不大（例如照片裁得比較緊），會被誤判成一顆可點擊
+// 的「貼紙」，使用者點歪一點就會把背景也灰階掉。
 export function grayFloodFillLabel(isLine, w, h, minAreaFrac, maxAreaFrac) {
   const n = w * h;
   const label = new Int32Array(n);
   const areas = [0], sumX = [0], sumY = [0];
+  const touchesBorder = [0];
   const stack = new Int32Array(n);
   let nextLabel = 1;
   for (let start = 0; start < n; start++) {
     if (isLine[start] || label[start]) continue;
     let sp = 0; stack[sp++] = start; label[start] = nextLabel;
-    let area = 0, sx = 0, sy = 0;
+    let area = 0, sx = 0, sy = 0, border = 0;
     while (sp > 0) {
       const idx = stack[--sp];
       area++;
       const x = idx % w, y = (idx / w) | 0;
       sx += x; sy += y;
+      if (x === 0 || x === w - 1 || y === 0 || y === h - 1) border = 1;
       if (x > 0) { const m = idx - 1; if (!isLine[m] && !label[m]) { label[m] = nextLabel; stack[sp++] = m; } }
       if (x < w - 1) { const m = idx + 1; if (!isLine[m] && !label[m]) { label[m] = nextLabel; stack[sp++] = m; } }
       if (y > 0) { const m = idx - w; if (!isLine[m] && !label[m]) { label[m] = nextLabel; stack[sp++] = m; } }
       if (y < h - 1) { const m = idx + w; if (!isLine[m] && !label[m]) { label[m] = nextLabel; stack[sp++] = m; } }
     }
-    areas.push(area); sumX.push(sx); sumY.push(sy);
+    areas.push(area); sumX.push(sx); sumY.push(sy); touchesBorder.push(border);
     nextLabel++;
   }
   const totalArea = n;
@@ -436,7 +410,7 @@ export function grayFloodFillLabel(isLine, w, h, minAreaFrac, maxAreaFrac) {
   let count = 0;
   for (let l = 1; l < nextLabel; l++) {
     centroidX[l] = sumX[l] / areas[l]; centroidY[l] = sumY[l] / areas[l];
-    if (areas[l] >= minArea && areas[l] <= maxArea) { valid[l] = 1; count++; }
+    if (areas[l] >= minArea && areas[l] <= maxArea && !touchesBorder[l]) { valid[l] = 1; count++; }
   }
   for (let i = 0; i < n; i++) { if (label[i] && !valid[label[i]]) label[i] = 0; }
   return { label, count, centroidX, centroidY, numLabels: nextLabel };
@@ -476,7 +450,7 @@ export function GrayscaleTool() {
   const stRef = useRef({
     img: null, natW: 0, natH: 0, workW: 0, workH: 0, workOriginal: null,
     clusterId: null, centroids: null, k: 0, borderClusterId: -1, borderManual: false,
-    lineMaskRaw: null, blackOnlyMask: null, boundaryMask: null, distToWall: null,
+    lineMaskRaw: null, blackOnlyMask: null, boundaryMask: null,
     desatBuffer: null, desatBufferPct: null, desatBufferColor: null,
     labelMask: null, resolvedLabelMask: null, keep: new Map(), manualOverride: null,
   });
@@ -551,9 +525,8 @@ export function GrayscaleTool() {
   }
 
   // 即時預覽合成：手動筆刷（如果有畫）優先權最高、且是硬邊（使用者自己畫的範圍
-  // 就該照畫的來）；自動辨識的部分則用「離最近格線的距離」算出 0 或 1 的權重
-  // （alpha）—— 緊貼格線的一小圈（EROSION_RADIUS 內）保證維持原圖、絕對不會蓋到
-  // 黑框，再往外一律直接變成完整灰階，不留原本顏色的殘影。
+  // 就該照畫的來）；黑色框線本身（blackOnly）永遠維持原圖，其餘只要是「沒被
+  // 使用者保留」的色塊一律直接變成完整灰階，不留原本顏色的殘影。
   function renderPreview() {
     const canvas = canvasRef.current;
     if (!canvas || !st.workOriginal) return;
@@ -565,7 +538,6 @@ export function GrayscaleTool() {
     const label = st.resolvedLabelMask;
     const manual = st.manualOverride;
     const boundary = st.boundaryMask;
-    const dist = st.distToWall;
     const out = ctx.createImageData(w, h);
     const od = out.data;
     for (let i = 0; i < w * h; i++) {
@@ -575,10 +547,8 @@ export function GrayscaleTool() {
       if (override === -1) alpha = 0;
       else if (override === 1) alpha = 1;
       else if (blackOnly[i] === 1) alpha = 0;
-      else if (!isKept(label[i])) {
-        const d = dist ? dist[i] : 255;
-        alpha = d <= GRAY_EROSION_RADIUS ? 0 : 1;
-      } else alpha = 0;
+      else if (!isKept(label[i])) alpha = 1;
+      else alpha = 0;
       od[k] = orig[k] + (desat[k] - orig[k]) * alpha;
       od[k + 1] = orig[k + 1] + (desat[k + 1] - orig[k + 1]) * alpha;
       od[k + 2] = orig[k + 2] + (desat[k + 2] - orig[k + 2]) * alpha;
@@ -605,7 +575,6 @@ export function GrayscaleTool() {
     const seg = grayFloodFillLabel(segLine, w, h, GRAY_MIN_AREA_FRAC, GRAY_MAX_AREA_FRAC);
     st.labelMask = seg.label;
     st.resolvedLabelMask = grayResolveUnknownLabels(rawLine, blackOnly, seg.label, w, h);
-    st.distToWall = grayDistanceToWall(rawLine, w, h, GRAY_EROSION_RADIUS + GRAY_FEATHER_WIDTH + 1);
     st.keep = new Map();
     computeBoundaryMask();
     setRegionCount(seg.count);
@@ -805,10 +774,6 @@ export function GrayscaleTool() {
     const resolvedNative = grayResolveUnknownLabels(isLineNative, blackOnlyNative, seg.label, natW, natH);
 
     const workW = st.workW, workH = st.workH, workLabel = st.labelMask;
-    const scaleRatio = workW > 0 ? natW / workW : 1;
-    const erosionNative = Math.max(1, Math.round(GRAY_EROSION_RADIUS * scaleRatio));
-    const featherNative = Math.max(1, Math.round(GRAY_FEATHER_WIDTH * scaleRatio));
-    const distNative = grayDistanceToWall(isLineNative, natW, natH, erosionNative + featherNative + 1);
     const nativeToWork = new Int32Array(seg.numLabels);
     for (let l = 1; l < seg.numLabels; l++) {
       const wx = Math.min(workW - 1, Math.max(0, Math.round((seg.centroidX[l] * workW) / natW)));
@@ -834,10 +799,7 @@ export function GrayscaleTool() {
       else {
         const nlab = resolvedNative[i];
         const wlab = nlab ? nativeToWork[nlab] : 0;
-        if (!isKept(wlab)) {
-          const d = distNative[i];
-          alpha = d <= erosionNative ? 0 : 1;
-        } else alpha = 0;
+        alpha = !isKept(wlab) ? 1 : 0;
       }
       const gr = r + (tr - r) * amt, gg = g + (tg - g) * amt, gb = b + (tb - b) * amt;
       od[idx] = r + (gr - r) * alpha;
