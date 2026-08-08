@@ -35,6 +35,9 @@ export default function App() {
   const [selectedCube, setSelectedCube] = useState(null);
   const [openTier, setOpenTier] = useState(10);
   const [brokenImages, setBrokenImages] = useState({});
+  // 方塊圖片重新上傳後，Storage 物件路徑沒變，瀏覽器/CDN 會一直吃舊的快取版本，
+  // 靠這個 state 幫「剛上傳的那個人」在網址後面加版本號逼瀏覽器重抓，不用等快取過期
+  const [imageVersion, setImageVersion] = useState({});
 
   const [draftFiles, setDraftFiles] = useState([]);
   const [editedFiles, setEditedFiles] = useState([]);
@@ -86,7 +89,7 @@ export default function App() {
       const { data, error } = await supabase.storage
         .from(STORAGE_BUCKET)
         .upload(fileName, file, {
-          cacheControl: '3600',
+          cacheControl: '60',
           upsert: true,
         });
       if (error) throw error;
@@ -778,13 +781,14 @@ export default function App() {
     }
     const result = await handleUpload(file, fileName);
     if (result.ok) {
-      showToast('圖片已更新，若畫面尚未刷新請重新整理');
+      showToast('圖片已更新');
       setBrokenImages((prev) => {
         const next = { ...prev };
         delete next[selectedCube.id];
         delete next[`detail-${selectedCube.id}`];
         return next;
       });
+      setImageVersion((prev) => ({ ...prev, [selectedCube.id]: Date.now() }));
     }
   };
 
@@ -870,7 +874,10 @@ export default function App() {
 
   const commentAuthorMap = (rows) => rows.map((r) => ({ id: r.id, author: resolveAuthorName(r.user_email), text: r.content, time: r.created_at, email: r.user_email }));
 
-  const detailImageUrl = selectedCube ? getCubeImageUrl(selectedCube.name) : null;
+  const detailImageUrlBase = selectedCube ? getCubeImageUrl(selectedCube.name) : null;
+  const detailImageUrl = detailImageUrlBase && selectedCube && imageVersion[selectedCube.id]
+    ? `${detailImageUrlBase}?v=${imageVersion[selectedCube.id]}`
+    : detailImageUrlBase;
   const detailStatus = selectedCube ? { draft: draftFiles.length > 0, edited: editedFiles.length > 0, video: videoFiles.length > 0, box: boxFiles.length > 0, article: !!cubeArticle } : null;
 
   let prevCube = null;
@@ -960,7 +967,7 @@ export default function App() {
           />
         )}
 
-        {view === 'grayscale' && role === 'designer' && <GrayscaleTool />}
+        {view === 'grayscale' && (role === 'designer' || role === 'admin') && <GrayscaleTool />}
 
         {view === 'dashboard' && (
           <div>

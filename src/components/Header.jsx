@@ -55,7 +55,7 @@ export function Header({ profile, session, role, onOpenAdmin, onOpenProfile, onL
               )}
             </button>
           )}
-          {(role === 'admin' || role === 'internal_partner' || role === 'designer') && (
+          {(role === 'admin' || role === 'internal_partner') && (
             <button
               onClick={onOpenInternalDocs}
               className="flex items-center gap-1.5 text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
@@ -82,7 +82,7 @@ export function Header({ profile, session, role, onOpenAdmin, onOpenProfile, onL
               )}
             </button>
           )}
-          {role === 'designer' && (
+          {(role === 'designer' || role === 'admin') && (
             <button
               onClick={onOpenGrayscale}
               className="flex items-center gap-1.5 text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
