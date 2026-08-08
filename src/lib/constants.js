@@ -111,10 +111,14 @@ export function getCubeImageStorageFileName(name) {
   return `${baseName}.png`;
 }
 
-export function getCubeImageUrl(name) {
+// versions 是 { 檔名: updated_at 時間戳 } 的對照表（見 fetchCubeImageVersions），
+// 有給的話會加在網址後面當版本號，確保檔案內容一變，網址就跟著變、不會被任何一層
+// 快取卡住；沒給就退回不帶版本號的網址（例如還沒抓到版本資料前的第一次渲染）。
+export function getCubeImageUrl(name, versions) {
   const fileName = getCubeImageStorageFileName(name);
   if (!fileName) return null;
-  return `${STORAGE_BASE_URL}/${fileName}`;
+  const v = versions && versions[fileName];
+  return `${STORAGE_BASE_URL}/${fileName}${v ? `?v=${v}` : ''}`;
 }
 
 

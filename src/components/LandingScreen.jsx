@@ -4,7 +4,7 @@ import { LearningMapGrid } from './learningMap/LearningMap.jsx';
 import { FONT_IMPORT } from '../styles/fontImport.js';
 
 
-export function LandingScreen({ imageError, onImageError, onEnter, onOpenCube, brokenImages, setBrokenImages, role, cubeStatusMap, theme }) {
+export function LandingScreen({ imageError, onImageError, onEnter, onOpenCube, brokenImages, setBrokenImages, role, cubeStatusMap, theme, imageVersions }) {
   const dotColors = ['bg-pink-500', 'bg-orange-500', 'bg-amber-400', 'bg-emerald-600', 'bg-orange-900', 'bg-violet-800'];
   return (
     <div className={`theme-${theme || 'dark'} min-h-screen bg-[var(--bg)] relative overflow-hidden flex items-center justify-center p-6`} style={{ fontFamily: "'JetBrains Mono', monospace" }}>
@@ -43,7 +43,7 @@ export function LandingScreen({ imageError, onImageError, onEnter, onOpenCube, b
         </div>
 
         <div className="mb-8">
-          <LearningMapGrid brokenImages={brokenImages} setBrokenImages={setBrokenImages} onOpenCube={onOpenCube} />
+          <LearningMapGrid brokenImages={brokenImages} setBrokenImages={setBrokenImages} onOpenCube={onOpenCube} imageVersions={imageVersions} />
         </div>
 
         <button

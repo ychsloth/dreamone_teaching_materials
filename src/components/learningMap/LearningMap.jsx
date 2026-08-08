@@ -58,10 +58,10 @@ export const RANK_MARKERS = [
 
 
 // 方塊詳情頁的「上一顆／下一顆」導覽按鈕，滑鼠移過去會顯示縮圖預覽
-export function CubeNavButton({ direction, cube, onNavigate, brokenImages, setBrokenImages }) {
+export function CubeNavButton({ direction, cube, onNavigate, brokenImages, setBrokenImages, imageVersions }) {
   const [hover, setHover] = useState(false);
   if (!cube) return <div className="w-10 shrink-0" />;
-  const imgUrl = getCubeImageUrl(cube.name);
+  const imgUrl = getCubeImageUrl(cube.name, imageVersions);
   const key = `nav-${cube.id}`;
   return (
     <div className="relative shrink-0" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
@@ -96,9 +96,9 @@ export function CubeNavButton({ direction, cube, onNavigate, brokenImages, setBr
 }
 
 
-export function LearningMapCubeButton({ name, brokenImages, setBrokenImages, onOpenCube }) {
+export function LearningMapCubeButton({ name, brokenImages, setBrokenImages, onOpenCube, imageVersions }) {
   const tier = findCubeTier(name);
-  const imgUrl = getCubeImageUrl(name);
+  const imgUrl = getCubeImageUrl(name, imageVersions);
   const key = `map-${name}`;
   if (!tier) return null;
   return (
@@ -133,7 +133,7 @@ export function LearningMapCubeButton({ name, brokenImages, setBrokenImages, onO
 }
 
 
-export function LearningMapGrid({ brokenImages, setBrokenImages, onOpenCube }) {
+export function LearningMapGrid({ brokenImages, setBrokenImages, onOpenCube, imageVersions }) {
   const legendColors = [
     { score: 10, bg: 'bg-pink-500' }, { score: 20, bg: 'bg-orange-500' }, { score: 30, bg: 'bg-amber-400' },
     { score: 50, bg: 'bg-emerald-600' }, { score: 60, bg: 'bg-orange-900' }, { score: 70, bg: 'bg-violet-800' },
@@ -185,7 +185,7 @@ export function LearningMapGrid({ brokenImages, setBrokenImages, onOpenCube }) {
                         <span className="text-sm text-[var(--mutedFg)] font-mono">－</span>
                       ) : (
                         g.cubes.map((name) => (
-                          <LearningMapCubeButton key={name} name={name} brokenImages={brokenImages} setBrokenImages={setBrokenImages} onOpenCube={onOpenCube} />
+                          <LearningMapCubeButton key={name} name={name} brokenImages={brokenImages} setBrokenImages={setBrokenImages} onOpenCube={onOpenCube} imageVersions={imageVersions} />
                         ))
                       )}
                     </div>

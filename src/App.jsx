@@ -18,7 +18,7 @@ import { CubeNavButton } from './components/learningMap/LearningMap.jsx';
 import { AssignTaskModal, DesignTaskModal, ScheduleView } from './components/schedule/ScheduleComponents.jsx';
 import { CubeBadges, LoadingScreen } from './components/shared/SmallUI.jsx';
 import { ADMIN_EMAIL, ALL_CUBES_FLAT, CATEGORY_COMMENT_COLUMN, CATEGORY_TABLE, CUBE_IMAGE_MAP, GENERAL_INSTRUCTOR_EMAILS, PROFILES_TABLE, ROLE_META, STAFF_EMAILS, TIERS, getCubeImageStorageFileName, getCubeImageUrl, normalizeEmail } from './lib/constants.js';
-import { STORAGE_BUCKET, supabase } from './lib/supabaseClient.js';
+import { STORAGE_BUCKET, fetchCubeImageVersions, supabase } from './lib/supabaseClient.js';
 import { FONT_IMPORT } from './styles/fontImport.js';
 
 
@@ -35,9 +35,10 @@ export default function App() {
   const [selectedCube, setSelectedCube] = useState(null);
   const [openTier, setOpenTier] = useState(10);
   const [brokenImages, setBrokenImages] = useState({});
-  // 方塊圖片重新上傳後，Storage 物件路徑沒變，瀏覽器/CDN 會一直吃舊的快取版本，
-  // 靠這個 state 幫「剛上傳的那個人」在網址後面加版本號逼瀏覽器重抓，不用等快取過期
-  const [imageVersion, setImageVersion] = useState({});
+  // 方塊圖片重新上傳後，Storage 物件路徑沒變，瀏覽器／Supabase 前面的 CDN 不保證
+  // 立刻吃到新版本。這裡存的是每個檔案「真正的」updated_at，加在圖片網址後面當版本
+  // 號，不管是誰、隔多久重新整理，只要檔案內容真的變了，網址就一定跟著變。
+  const [imageVersions, setImageVersions] = useState({});
 
   const [draftFiles, setDraftFiles] = useState([]);
   const [editedFiles, setEditedFiles] = useState([]);
@@ -231,6 +232,12 @@ export default function App() {
       listener.subscription.unsubscribe();
     };
   }, [fetchProfile]);
+
+  // 方塊圖片版本號：首頁的學習地圖登入前就看得到，所以這裡不能等登入完成才抓，
+  // 一開頁就直接讀，跟登入狀態無關
+  useEffect(() => {
+    fetchCubeImageVersions().then(setImageVersions);
+  }, []);
 
   const handleGoogleLogin = async () => {
     setAuthError('');
@@ -788,7 +795,7 @@ export default function App() {
         delete next[`detail-${selectedCube.id}`];
         return next;
       });
-      setImageVersion((prev) => ({ ...prev, [selectedCube.id]: Date.now() }));
+      fetchCubeImageVersions().then(setImageVersions);
     }
   };
 
@@ -818,6 +825,7 @@ export default function App() {
         role={profile ? profile.role : null}
         cubeStatusMap={cubeStatusMap}
         theme={profile ? profile.theme : 'dark'}
+        imageVersions={imageVersions}
       />
     );
   }
@@ -874,10 +882,7 @@ export default function App() {
 
   const commentAuthorMap = (rows) => rows.map((r) => ({ id: r.id, author: resolveAuthorName(r.user_email), text: r.content, time: r.created_at, email: r.user_email }));
 
-  const detailImageUrlBase = selectedCube ? getCubeImageUrl(selectedCube.name) : null;
-  const detailImageUrl = detailImageUrlBase && selectedCube && imageVersion[selectedCube.id]
-    ? `${detailImageUrlBase}?v=${imageVersion[selectedCube.id]}`
-    : detailImageUrlBase;
+  const detailImageUrl = selectedCube ? getCubeImageUrl(selectedCube.name, imageVersions) : null;
   const detailStatus = selectedCube ? { draft: draftFiles.length > 0, edited: editedFiles.length > 0, video: videoFiles.length > 0, box: boxFiles.length > 0, article: !!cubeArticle } : null;
 
   let prevCube = null;
@@ -1010,7 +1015,7 @@ export default function App() {
                       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 p-5 pt-0">
                         {tier.cubes.map((name) => {
                           const cube = { id: `${tier.score}__${name}`, name, tier };
-                          const imgUrl = getCubeImageUrl(name);
+                          const imgUrl = getCubeImageUrl(name, imageVersions);
                           const status = cubeStatusMap[name];
                           return (
                             <button
@@ -1070,7 +1075,7 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-3 mb-6">
-              <CubeNavButton direction="prev" cube={prevCube} onNavigate={openCube} brokenImages={brokenImages} setBrokenImages={setBrokenImages} />
+              <CubeNavButton direction="prev" cube={prevCube} onNavigate={openCube} brokenImages={brokenImages} setBrokenImages={setBrokenImages} imageVersions={imageVersions} />
               <div className="flex-1 flex items-center justify-between flex-wrap gap-4 bg-[var(--card)] border border-[var(--border)] cyber-chamfer p-6 ">
               <div className="flex items-center gap-4">
                 <div
@@ -1120,7 +1125,7 @@ export default function App() {
                 )}
               </div>
               </div>
-              <CubeNavButton direction="next" cube={nextCube} onNavigate={openCube} brokenImages={brokenImages} setBrokenImages={setBrokenImages} />
+              <CubeNavButton direction="next" cube={nextCube} onNavigate={openCube} brokenImages={brokenImages} setBrokenImages={setBrokenImages} imageVersions={imageVersions} />
             </div>
 
             {(role === 'admin' || role === 'internal_partner' || role === 'designer') && (

@@ -27,3 +27,22 @@ export const STORAGE_BASE_URL = `${SUPABASE_URL}/storage/v1/object/public/${STOR
 export const LOGO_URL = `${STORAGE_BASE_URL}/logo.png`;
 
 export const LEARNING_MAP_URL = `${SUPABASE_URL}/storage/v1/object/public/manu/learning_map.png`;
+
+
+// 方塊圖片重新上傳後，Storage 物件路徑沒變，光靠 Cache-Control 沒辦法保證瀏覽器／
+// Supabase 前面的 CDN 一定會立刻抓到新版本（重新整理過還是有機率吃到舊快取）。
+// 這裡改成讀 Storage 裡每個檔案「真正的」updated_at 時間戳，讓每個方塊的圖片網址
+// 都帶上這個時間戳當版本號——只要檔案內容真的變了，網址就一定跟著變，不管中間有
+// 幾層快取都不影響，同時內容沒變的圖片網址維持不變，還是能正常被快取。
+export async function fetchCubeImageVersions() {
+  const { data, error } = await supabase.storage.from(STORAGE_BUCKET).list('', { limit: 1000 });
+  if (error) {
+    console.error('[讀取方塊圖片版本失敗]', error.message, error);
+    return {};
+  }
+  const map = {};
+  (data || []).forEach((f) => {
+    if (f.name && f.updated_at) map[f.name] = new Date(f.updated_at).getTime();
+  });
+  return map;
+}
