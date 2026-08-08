@@ -86,13 +86,15 @@ export const CUBE_IMAGE_MAP = {
 // 不能顯示的 .psd）。上傳跟顯示都一律經過這個函式算出「.png」路徑，兩邊永遠對得上，
 // 之後不管管理員實際傳的是 png/jpg/webp 哪種格式，都會被存到同一個位置、正常顯示，
 // 不會再發生「上傳成功但顯示邏輯因為副檔名不對而拒看」的狀況。
+// 不在 CUBE_IMAGE_MAP 裡的方塊（例如啟蒙系列這幾顆還沒建檔名對照的）不再直接擋掉
+// 上傳——直接用方塊名稱本身算出一個固定路徑，前台傳照片就能生效，不用等工程師先
+// 手動補一筆對照表。
 export function getCubeImageStorageFileName(name) {
+  if (!name) return null;
   const rawFileName = CUBE_IMAGE_MAP[name];
-  if (!rawFileName) {
-    console.warn(`[CUBE_IMAGE_MAP 缺漏] 找不到方塊「${name}」對應的檔名，請檢查 CUBE_IMAGE_MAP 常數。`);
-    return null;
-  }
-  const baseName = rawFileName.replace(/\.[^.]+$/, '');
+  const baseName = rawFileName
+    ? rawFileName.replace(/\.[^.]+$/, '')
+    : `cube-${encodeURIComponent(name)}`;
   return `${baseName}.png`;
 }
 

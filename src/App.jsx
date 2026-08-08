@@ -775,8 +775,8 @@ export default function App() {
     if (!session) { alert('請先登入後再上傳'); return; }
     const fileName = getCubeImageStorageFileName(selectedCube.name);
     if (!fileName) {
-      console.error(`[圖片上傳失敗] CUBE_IMAGE_MAP 找不到「${selectedCube.name}」對應的檔名`);
-      alert('這顆方塊尚未在 CUBE_IMAGE_MAP 設定檔名，請先請工程師新增對照');
+      console.error(`[圖片上傳失敗] 沒有選取有效的方塊名稱`);
+      alert('上傳失敗：沒有選取有效的方塊');
       return;
     }
     const result = await handleUpload(file, fileName);
