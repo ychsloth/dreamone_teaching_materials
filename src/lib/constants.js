@@ -77,21 +77,28 @@ export const CUBE_IMAGE_MAP = {
   '二階五魔方': 'cube_13.png', '費雪': 'cube_14.png', '風火輪': 'cube_15.png', '斜轉': 'cube_16.png',
   '三階齒輪': 'cube_17.png', '4x4x4': 'cube_18.png', '5x5x5': 'cube_19.png', 'FTO': 'cube_20.png',
   '五魔方': 'cube_21.png', '二階金字塔': 'cube_22.png', '四階金字塔': 'cube_23.png', 'Square-1': 'cube_24.png',
-  '超級楓葉': 'cube_25.psd', '3x3x4': 'cube_26.png', '6x6x6': 'cube_27.png', '7x7x7': 'cube_28.png',
+  '超級楓葉': 'cube_25.png', '3x3x4': 'cube_26.png', '6x6x6': 'cube_27.png', '7x7x7': 'cube_28.png',
   '三階粽子': 'cube_29.png', '軸方塊': 'cube_30.png', '三葉草': 'cube_31.png',
 };
 
 
-export function getCubeImageUrl(name) {
-  const fileName = CUBE_IMAGE_MAP[name];
-  if (!fileName) {
+// CUBE_IMAGE_MAP 裡記的副檔名不一定可信（例如某顆方塊還沒照片時，暫時填了瀏覽器
+// 不能顯示的 .psd）。上傳跟顯示都一律經過這個函式算出「.png」路徑，兩邊永遠對得上，
+// 之後不管管理員實際傳的是 png/jpg/webp 哪種格式，都會被存到同一個位置、正常顯示，
+// 不會再發生「上傳成功但顯示邏輯因為副檔名不對而拒看」的狀況。
+export function getCubeImageStorageFileName(name) {
+  const rawFileName = CUBE_IMAGE_MAP[name];
+  if (!rawFileName) {
     console.warn(`[CUBE_IMAGE_MAP 缺漏] 找不到方塊「${name}」對應的檔名，請檢查 CUBE_IMAGE_MAP 常數。`);
     return null;
   }
-  if (fileName.toLowerCase().endsWith('.psd')) {
-    console.warn(`[格式不支援] 方塊「${name}」對應的檔案 ${fileName} 是 .psd，瀏覽器無法直接顯示，已改用替代圖示。`);
-    return null;
-  }
+  const baseName = rawFileName.replace(/\.[^.]+$/, '');
+  return `${baseName}.png`;
+}
+
+export function getCubeImageUrl(name) {
+  const fileName = getCubeImageStorageFileName(name);
+  if (!fileName) return null;
   return `${STORAGE_BASE_URL}/${fileName}`;
 }
 

@@ -17,7 +17,7 @@ import { GrayscaleTool } from './components/grayscale/GrayscaleTool.jsx';
 import { CubeNavButton } from './components/learningMap/LearningMap.jsx';
 import { AssignTaskModal, DesignTaskModal, ScheduleView } from './components/schedule/ScheduleComponents.jsx';
 import { CubeBadges, LoadingScreen } from './components/shared/SmallUI.jsx';
-import { ADMIN_EMAIL, ALL_CUBES_FLAT, CATEGORY_COMMENT_COLUMN, CATEGORY_TABLE, CUBE_IMAGE_MAP, GENERAL_INSTRUCTOR_EMAILS, PROFILES_TABLE, ROLE_META, STAFF_EMAILS, TIERS, getCubeImageUrl, normalizeEmail } from './lib/constants.js';
+import { ADMIN_EMAIL, ALL_CUBES_FLAT, CATEGORY_COMMENT_COLUMN, CATEGORY_TABLE, CUBE_IMAGE_MAP, GENERAL_INSTRUCTOR_EMAILS, PROFILES_TABLE, ROLE_META, STAFF_EMAILS, TIERS, getCubeImageStorageFileName, getCubeImageUrl, normalizeEmail } from './lib/constants.js';
 import { STORAGE_BUCKET, supabase } from './lib/supabaseClient.js';
 import { FONT_IMPORT } from './styles/fontImport.js';
 
@@ -773,7 +773,7 @@ export default function App() {
     e.target.value = '';
     if (!file || !selectedCube) return;
     if (!session) { alert('請先登入後再上傳'); return; }
-    const fileName = CUBE_IMAGE_MAP[selectedCube.name];
+    const fileName = getCubeImageStorageFileName(selectedCube.name);
     if (!fileName) {
       console.error(`[圖片上傳失敗] CUBE_IMAGE_MAP 找不到「${selectedCube.name}」對應的檔名`);
       alert('這顆方塊尚未在 CUBE_IMAGE_MAP 設定檔名，請先請工程師新增對照');
