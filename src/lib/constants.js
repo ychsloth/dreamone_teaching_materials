@@ -82,6 +82,19 @@ export const CUBE_IMAGE_MAP = {
 };
 
 
+// Supabase Storage 的物件路徑（key）不接受中文或百分比編碼字元（傳了會直接
+// StorageApiError: Invalid key），所以中文方塊名稱不能直接當檔名、也不能用
+// encodeURIComponent（結果帶 % 一樣會被拒絕）。這裡把名稱裡每個非英數字元換成
+// 它的 Unicode codepoint（16進位），結果保證只有小寫英數字跟連字號，Supabase
+// 一定收。同一個名稱每次算出來的結果固定不變，不需要另外存一份對照表。
+function slugifyForStorageKey(name) {
+  let out = '';
+  for (const ch of name) {
+    out += /[a-zA-Z0-9]/.test(ch) ? ch.toLowerCase() : `-${ch.codePointAt(0).toString(16)}-`;
+  }
+  return out.replace(/-+/g, '-').replace(/^-|-$/g, '');
+}
+
 // CUBE_IMAGE_MAP 裡記的副檔名不一定可信（例如某顆方塊還沒照片時，暫時填了瀏覽器
 // 不能顯示的 .psd）。上傳跟顯示都一律經過這個函式算出「.png」路徑，兩邊永遠對得上，
 // 之後不管管理員實際傳的是 png/jpg/webp 哪種格式，都會被存到同一個位置、正常顯示，
@@ -94,7 +107,7 @@ export function getCubeImageStorageFileName(name) {
   const rawFileName = CUBE_IMAGE_MAP[name];
   const baseName = rawFileName
     ? rawFileName.replace(/\.[^.]+$/, '')
-    : `cube-${encodeURIComponent(name)}`;
+    : `cube-${slugifyForStorageKey(name)}`;
   return `${baseName}.png`;
 }
 
