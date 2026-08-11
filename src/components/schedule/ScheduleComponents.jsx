@@ -240,7 +240,7 @@ export function DesignTaskPreviewModal({ task, session, onClose }) {
           </button>
         </div>
         <div className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden">
-          <div className="flex-1 min-h-[320px] bg-black flex flex-col">
+          <div className="flex-1 min-w-0 min-h-[320px] bg-black flex flex-col">
             <div className="flex-1 min-h-0">
               <DrivePdfViewer category={task.file_category} recordId={task.file_id} pageNumber={currentPage} onNumPages={() => {}} session={session} fitHeight />
             </div>

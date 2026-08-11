@@ -59,7 +59,7 @@ export function ReviewModal({ file, category, kindLabel, comments, commentsLoadi
         )}
 
         <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
-          <div className="relative flex-1 min-h-[300px] overflow-auto">
+          <div className="relative flex-1 min-w-0 min-h-[300px] overflow-auto">
             <DrivePdfViewer category={category} recordId={file.id} watermark={watermark} pageNumber={activePage} onNumPages={setNumPages} session={session} />
           </div>
 
