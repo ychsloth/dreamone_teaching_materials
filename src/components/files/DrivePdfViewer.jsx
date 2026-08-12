@@ -90,7 +90,7 @@ export function DrivePdfViewer({ category, recordId, watermark, pageNumber, onNu
   }, [cacheKey, category, recordId, session]);
 
   return (
-    <div ref={containerRef} className={`relative bg-black flex flex-col items-center justify-center ${fitHeight ? 'h-full overflow-hidden' : 'overflow-auto'}`} style={fitHeight ? undefined : { minHeight: 420 }}>
+    <div ref={containerRef} className={`relative bg-black flex flex-col items-center justify-center overflow-auto ${fitHeight ? 'h-full' : ''}`} style={fitHeight ? undefined : { minHeight: 420 }}>
       {loading && <p className="text-[var(--mutedFg)] text-sm py-10">讀取檔案中...</p>}
       {error && <p className="text-[var(--dangerText)] text-sm py-10 px-4 text-center">讀取失敗：{error}</p>}
       {blobUrl && !error && (
