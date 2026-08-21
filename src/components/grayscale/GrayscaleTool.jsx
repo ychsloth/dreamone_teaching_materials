@@ -199,6 +199,39 @@ export function grayIdentifyBorderCluster(centroids, k, clusterId, n) {
 }
 
 
+// 「這張照片的彩度門檻」：低於這個彩度的像素視為中性（黑框、白色貼紙、灰階陰影、
+// 反光、抗鋸齒過渡），不做灰階、完全保留原圖。門檻不是固定值，而是由這張照片自己
+// 的調色盤推算——取最鮮豔那一群彩度的一小部分，照片本身越鮮豔門檻越高，本來就偏
+// 灰的照片門檻自動變低。上下限只是安全夾制，避免極端照片（全灰或超飽和）失控。
+export function grayAdaptiveChromaThreshold(centroids, k) {
+  let maxChroma = 0;
+  for (let c = 0; c < k; c++) {
+    const A = centroids[c * 3 + 1], B = centroids[c * 3 + 2];
+    const chroma = Math.sqrt(A * A + B * B);
+    if (chroma > maxChroma) maxChroma = chroma;
+  }
+  return Math.min(14, Math.max(2.5, maxChroma * 0.12));
+}
+
+
+// 邊界／黑框保護遮罩：純粹用「這個像素還有沒有彩度」判斷，跟位置、跟離格線多遠
+// 完全無關，所以不受解析度、方塊大小、拍攝角度、黑框粗細影響。
+// 1 = 中性像素，維持原圖；0 = 還看得出顏色，可以被灰階。
+// 這樣黑框、黑框的抗鋸齒、溝槽、反光、陰影全部自動落在保護區裡；反過來說，任何
+// 「還帶著顏色」的像素都不可能被保護 → 顏色 halo 不可能殘留。
+export function grayBuildChromaProtectMask(data, n, threshold) {
+  const mask = new Uint8Array(n);
+  const t2 = threshold * threshold;
+  for (let i = 0; i < n; i++) {
+    const k = i * 4;
+    const lab = grayRgbToLab(data[k], data[k + 1], data[k + 2]);
+    const A = lab[1], B = lab[2];
+    mask[i] = A * A + B * B < t2 ? 1 : 0;
+  }
+  return mask;
+}
+
+
 // 找一小塊區域裡出現最多次的值（眾數），給「點擊指定黑框位置」用：取一小塊區域
 // 而不是單一像素，避免剛好點到反光或邊緣噪點所在的那個群
 export function grayMode(arr) {
@@ -417,10 +450,13 @@ export function grayFloodFillLabel(isLine, w, h, minAreaFrac, maxAreaFrac) {
 }
 
 
-// 把「無法辨識但不是黑色」的像素，就近併入旁邊偵測到的色塊分組（4方向 BFS，
-// 遇到真正的黑色框線就停止擴散，所以不會跨過真實格線把兩塊不同貼紙的分組混在
-// 一起）。回傳的 resolvedLabel 拿來做「灰階與否」的判斷和「點擊命中測試」。
-export function grayResolveUnknownLabels(rawLine, blackOnly, label, w, h) {
+// 把「落在格線遮罩裡、但其實還帶著顏色」的像素，就近併入旁邊那顆貼紙的分組
+// （4方向 BFS）。擴散的阻擋條件是 protect（中性像素＝黑框／邊界），不是「被分到
+// 黑框那一群」——關鍵差別在這裡：一個 50% 紅 + 50% 黑的抗鋸齒像素是深紅色，很容易
+// 被分到黑框那一群，用舊條件就會卡在這裡拿不到編號、永遠保留原本的紅色（halo 的
+// 來源之一）；用彩度判斷它就會被正確吸收進紅色貼紙，跟著一起灰階。
+// 因為只在 rawLine 內擴散、又被中性的黑框擋住，不會跨過真實格線把兩顆貼紙混在一起。
+export function grayResolveUnknownLabels(rawLine, protect, label, w, h) {
   const n = w * h;
   const resolved = label.slice();
   const queue = new Int32Array(n);
@@ -431,7 +467,7 @@ export function grayResolveUnknownLabels(rawLine, blackOnly, label, w, h) {
     const lab = resolved[idx];
     const x = idx % w, y = (idx / w) | 0;
     const tryExpand = (m) => {
-      if (rawLine[m] && !blackOnly[m] && !resolved[m]) { resolved[m] = lab; queue[qTail++] = m; }
+      if (rawLine[m] && !protect[m] && !resolved[m]) { resolved[m] = lab; queue[qTail++] = m; }
     };
     if (x > 0) tryExpand(idx - 1);
     if (x < w - 1) tryExpand(idx + 1);
@@ -450,7 +486,7 @@ export function GrayscaleTool() {
   const stRef = useRef({
     img: null, natW: 0, natH: 0, workW: 0, workH: 0, workOriginal: null,
     clusterId: null, centroids: null, k: 0, borderClusterId: -1, borderManual: false,
-    lineMaskRaw: null, blackOnlyMask: null, boundaryMask: null, nearLineMask: null,
+    lineMaskRaw: null, blackOnlyMask: null, boundaryMask: null, protectMask: null, chromaThreshold: 0,
     desatBuffer: null, desatBufferPct: null, desatBufferColor: null,
     labelMask: null, resolvedLabelMask: null, keep: new Map(), manualOverride: null,
   });
@@ -485,15 +521,25 @@ export function GrayscaleTool() {
     return v === undefined ? true : v;
   }
 
+  // 降低彩度改用「保留亮度的灰階」：每個像素換成它自己的亮度
+  // （0.299R+0.587G+0.114B），而不是整片塗成同一個灰色。兩個關鍵好處：
+  //   1. 貼紙原本的陰影、反光、立體感全部留著，不會變成一塊平板灰。
+  //   2. 對本來就沒有彩度的像素（黑框、白色、灰階陰影、抗鋸齒過渡）幾乎等於沒動
+  //      作——這正是不用再靠「往內縮幾個 pixel」保護黑框的根本原因。
+  // 顏色選擇器維持原本的 UI，意義改成「色調」：預設的中性灰 #8c8c8c 算出來剛好就是
+  // 純灰階，選別的顏色則在保留每個像素亮度的前提下整體偏向那個色調。
   function computeDesatBuffer() {
     const orig = st.workOriginal.data;
     const out = new Uint8ClampedArray(orig.length);
     const amt = desatPct / 100;
     const { r: tr, g: tg, b: tb } = grayColor;
+    const tintLum = 0.299 * tr + 0.587 * tg + 0.114 * tb;
+    const dr = tr - tintLum, dg = tg - tintLum, db = tb - tintLum;
     for (let i = 0; i < orig.length; i += 4) {
-      out[i] = orig[i] + (tr - orig[i]) * amt;
-      out[i + 1] = orig[i + 1] + (tg - orig[i + 1]) * amt;
-      out[i + 2] = orig[i + 2] + (tb - orig[i + 2]) * amt;
+      const lum = 0.299 * orig[i] + 0.587 * orig[i + 1] + 0.114 * orig[i + 2];
+      out[i] = orig[i] + (lum + dr - orig[i]) * amt;
+      out[i + 1] = orig[i + 1] + (lum + dg - orig[i + 1]) * amt;
+      out[i + 2] = orig[i + 2] + (lum + db - orig[i + 2]) * amt;
       out[i + 3] = orig[i + 3];
     }
     st.desatBuffer = out; st.desatBufferPct = desatPct; st.desatBufferColor = grayColorHex;
@@ -524,9 +570,11 @@ export function GrayscaleTool() {
     st.boundaryMask = boundary;
   }
 
-  // 即時預覽合成：手動筆刷（如果有畫）優先權最高、且是硬邊（使用者自己畫的範圍
-  // 就該照畫的來）；黑色框線本身跟緊貼它 1px 的保護帶（nearLineMask）永遠維持
-  // 原圖，其餘只要是「沒被使用者保留」的色塊一律直接變成完整灰階。
+  // 即時預覽合成。最終的灰階遮罩就是：
+  //     grayMask = 屬於使用者點的那顆貼紙  AND  NOT 中性像素（黑框／邊界保護）
+  // 手動筆刷 override 優先權最高（使用者自己畫的範圍就照畫的來）。
+  // 沒有任何「往內縮 N 個 pixel」的步驟——邊界保護完全由彩度決定，見
+  // grayBuildChromaProtectMask。
   function renderPreview() {
     const canvas = canvasRef.current;
     if (!canvas || !st.workOriginal) return;
@@ -534,11 +582,10 @@ export function GrayscaleTool() {
     const w = st.workW, h = st.workH;
     const orig = st.workOriginal.data;
     const desat = getDesatBuffer();
-    const blackOnly = st.blackOnlyMask;
+    const protect = st.protectMask;
     const label = st.resolvedLabelMask;
     const manual = st.manualOverride;
     const boundary = st.boundaryMask;
-    const nearLine = st.nearLineMask;
     const out = ctx.createImageData(w, h);
     const od = out.data;
     for (let i = 0; i < w * h; i++) {
@@ -547,8 +594,8 @@ export function GrayscaleTool() {
       let alpha;
       if (override === -1) alpha = 0;
       else if (override === 1) alpha = 1;
-      else if (blackOnly[i] === 1) alpha = 0;
-      else if (!isKept(label[i])) alpha = (nearLine && nearLine[i]) ? 0 : 1;
+      else if (protect[i] === 1) alpha = 0;
+      else if (!isKept(label[i])) alpha = 1;
       else alpha = 0;
       od[k] = orig[k] + (desat[k] - orig[k]) * alpha;
       od[k + 1] = orig[k + 1] + (desat[k + 1] - orig[k + 1]) * alpha;
@@ -573,13 +620,12 @@ export function GrayscaleTool() {
     const { rawLine, segLine, blackOnly } = grayBuildLineMaskFromClusters(st.clusterId, w, h, st.borderClusterId, edgeMask);
     st.lineMaskRaw = rawLine;
     st.blackOnlyMask = blackOnly;
-    // 緊貼格線往外恰好 1px 的保護帶：直接在目前這個解析度上做 1 次膨脹算出來，
-    // 不是拿工作解析度的距離值等比例放大，所以不會因為照片解析度變高就跟著變粗，
-    // 邊緣只會留一點點、不會出現明顯的顏色圈。
-    st.nearLineMask = grayMorphDilate(rawLine, w, h);
+    // 邊界／黑框保護：用彩度判斷，不用幾何距離，所以跟解析度、黑框粗細無關。
+    const protect = grayBuildChromaProtectMask(st.workOriginal.data, w * h, st.chromaThreshold);
+    st.protectMask = protect;
     const seg = grayFloodFillLabel(segLine, w, h, GRAY_MIN_AREA_FRAC, GRAY_MAX_AREA_FRAC);
     st.labelMask = seg.label;
-    st.resolvedLabelMask = grayResolveUnknownLabels(rawLine, blackOnly, seg.label, w, h);
+    st.resolvedLabelMask = grayResolveUnknownLabels(rawLine, protect, seg.label, w, h);
     st.keep = new Map();
     computeBoundaryMask();
     setRegionCount(seg.count);
@@ -595,6 +641,9 @@ export function GrayscaleTool() {
     const w = st.workW, h = st.workH, n = w * h;
     const { clusterId, centroids, k } = grayComputeClustering(st.workOriginal.data, n);
     st.clusterId = clusterId; st.centroids = centroids; st.k = k;
+    // 彩度門檻跟調色盤一樣，只在上傳新照片時算一次，匯出時重用同一個值，
+    // 確保預覽跟匯出的保護範圍完全一致
+    st.chromaThreshold = grayAdaptiveChromaThreshold(centroids, k);
     st.borderManual = false;
     setBorderManualUI(false);
     st.borderClusterId = grayIdentifyBorderCluster(centroids, k, clusterId, n);
@@ -774,12 +823,13 @@ export function GrayscaleTool() {
 
     const nativeClusterId = grayAssignWithCentroids(orig, n, st.centroids, st.k);
     const edgeMask = auxDetectionMode ? grayBuildEdgeMask(orig, natW, natH, GRAY_EDGE_THRESHOLD) : null;
-    const { rawLine: isLineNative, segLine, blackOnly: blackOnlyNative } = grayBuildLineMaskFromClusters(nativeClusterId, natW, natH, st.borderClusterId, edgeMask);
+    const { rawLine: isLineNative, segLine } = grayBuildLineMaskFromClusters(nativeClusterId, natW, natH, st.borderClusterId, edgeMask);
     const seg = grayFloodFillLabel(segLine, natW, natH, GRAY_MIN_AREA_FRAC, GRAY_MAX_AREA_FRAC);
-    const resolvedNative = grayResolveUnknownLabels(isLineNative, blackOnlyNative, seg.label, natW, natH);
-    // 跟預覽一樣，直接在原生解析度上做 1 次膨脹算保護帶，不會因為原生解析度比
-    // 工作解析度高很多而跟著等比例變粗。
-    const nearLineNative = grayMorphDilate(isLineNative, natW, natH);
+    // 保護遮罩用跟預覽同一個彩度門檻，在原生解析度上重算一次。因為判斷依據是
+    // 「這個像素有沒有彩度」而不是「離格線幾個 pixel」，換解析度不會讓保護範圍
+    // 變粗或變細，匯出結果跟預覽看到的一致。
+    const protectNative = grayBuildChromaProtectMask(orig, n, st.chromaThreshold);
+    const resolvedNative = grayResolveUnknownLabels(isLineNative, protectNative, seg.label, natW, natH);
 
     const workW = st.workW, workH = st.workH, workLabel = st.labelMask;
     const nativeToWork = new Int32Array(seg.numLabels);
@@ -795,6 +845,8 @@ export function GrayscaleTool() {
     const od = out.data;
     const amt = desatPct / 100;
     const { r: tr, g: tg, b: tb } = grayColor;
+    const tintLum = 0.299 * tr + 0.587 * tg + 0.114 * tb;
+    const dr = tr - tintLum, dg = tg - tintLum, db = tb - tintLum;
 
     for (let i = 0; i < n; i++) {
       const idx = i * 4;
@@ -803,13 +855,15 @@ export function GrayscaleTool() {
       let alpha;
       if (override === -1) alpha = 0;
       else if (override === 1) alpha = 1;
-      else if (blackOnlyNative[i]) alpha = 0;
+      else if (protectNative[i] === 1) alpha = 0;
       else {
         const nlab = resolvedNative[i];
         const wlab = nlab ? nativeToWork[nlab] : 0;
-        alpha = !isKept(wlab) ? (nearLineNative[i] ? 0 : 1) : 0;
+        alpha = !isKept(wlab) ? 1 : 0;
       }
-      const gr = r + (tr - r) * amt, gg = g + (tg - g) * amt, gb = b + (tb - b) * amt;
+      // 跟預覽同一套「保留亮度的灰階」，見 computeDesatBuffer 的說明
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      const gr = r + (lum + dr - r) * amt, gg = g + (lum + dg - g) * amt, gb = b + (lum + db - b) * amt;
       od[idx] = r + (gr - r) * alpha;
       od[idx + 1] = g + (gg - g) * alpha;
       od[idx + 2] = b + (gb - b) * alpha;
