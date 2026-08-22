@@ -232,6 +232,24 @@ export function grayBuildChromaProtectMask(data, n, threshold) {
 }
 
 
+// 每一片貼紙自己的平均亮度。灰階時用「這片貼紙的平均」當基準，把整片平移到統一的
+// 灰階值，就能做到：白色貼紙跟紅色貼紙灰掉之後深淺一樣，但各自原本的明暗起伏都
+// 留著。只統計真的會被灰階的像素（跳過中性的黑框），平均值才不會被黑框拉低。
+export function grayComputeRegionMeanLum(data, resolved, protect, n, numLabels) {
+  const sum = new Float64Array(numLabels), cnt = new Float64Array(numLabels);
+  for (let i = 0; i < n; i++) {
+    const l = resolved[i];
+    if (!l || protect[i]) continue;
+    const j = i * 4;
+    sum[l] += 0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2];
+    cnt[l]++;
+  }
+  const mean = new Float32Array(numLabels);
+  for (let l = 1; l < numLabels; l++) mean[l] = cnt[l] ? sum[l] / cnt[l] : 0;
+  return mean;
+}
+
+
 // 找一小塊區域裡出現最多次的值（眾數），給「點擊指定黑框位置」用：取一小塊區域
 // 而不是單一像素，避免剛好點到反光或邊緣噪點所在的那個群
 export function grayMode(arr) {
@@ -515,7 +533,7 @@ export function GrayscaleTool() {
     img: null, natW: 0, natH: 0, workW: 0, workH: 0, workOriginal: null,
     clusterId: null, centroids: null, k: 0, borderClusterId: -1, borderManual: false,
     lineMaskRaw: null, blackOnlyMask: null, boundaryMask: null, protectMask: null, chromaThreshold: 0,
-    desatBuffer: null, desatBufferPct: null, desatBufferColor: null,
+    regionMeanLum: null,
     labelMask: null, resolvedLabelMask: null, keep: new Map(), manualOverride: null,
   });
   const st = stRef.current;
@@ -549,32 +567,17 @@ export function GrayscaleTool() {
     return v === undefined ? true : v;
   }
 
-  // 降低彩度改用「保留亮度的灰階」：每個像素換成它自己的亮度
-  // （0.299R+0.587G+0.114B），而不是整片塗成同一個灰色。兩個關鍵好處：
-  //   1. 貼紙原本的陰影、反光、立體感全部留著，不會變成一塊平板灰。
-  //   2. 對本來就沒有彩度的像素（黑框、白色、灰階陰影、抗鋸齒過渡）幾乎等於沒動
-  //      作——這正是不用再靠「往內縮幾個 pixel」保護黑框的根本原因。
-  // 顏色選擇器維持原本的 UI，意義改成「色調」：預設的中性灰 #8c8c8c 算出來剛好就是
-  // 純灰階，選別的顏色則在保留每個像素亮度的前提下整體偏向那個色調。
-  function computeDesatBuffer() {
-    const orig = st.workOriginal.data;
-    const out = new Uint8ClampedArray(orig.length);
-    const amt = desatPct / 100;
-    const { r: tr, g: tg, b: tb } = grayColor;
-    const tintLum = 0.299 * tr + 0.587 * tg + 0.114 * tb;
-    const dr = tr - tintLum, dg = tg - tintLum, db = tb - tintLum;
-    for (let i = 0; i < orig.length; i += 4) {
-      const lum = 0.299 * orig[i] + 0.587 * orig[i + 1] + 0.114 * orig[i + 2];
-      out[i] = orig[i] + (lum + dr - orig[i]) * amt;
-      out[i + 1] = orig[i + 1] + (lum + dg - orig[i + 1]) * amt;
-      out[i + 2] = orig[i + 2] + (lum + db - orig[i + 2]) * amt;
-      out[i + 3] = orig[i + 3];
-    }
-    st.desatBuffer = out; st.desatBufferPct = desatPct; st.desatBufferColor = grayColorHex;
-  }
-  function getDesatBuffer() {
-    if (!st.desatBuffer || st.desatBufferPct !== desatPct || st.desatBufferColor !== grayColorHex) computeDesatBuffer();
-    return st.desatBuffer;
+  // 一片貼紙灰階後應該長什麼樣：
+  //     結果 = 統一灰階顏色 + （這個像素的亮度 − 這片貼紙的平均亮度）
+  // 也就是把整片貼紙「平移」到使用者選的那個灰（預設 #8c8c8c），但每個像素相對於
+  // 整片的明暗差原封不動保留下來。這樣可以同時滿足兩件事：
+  //   1. 不管原本是白色、黃色還是深紅，灰掉之後深淺一致——方塊打亂後、同一張圖上
+  //      有好幾種顏色被灰掉時，才不會變成一片深淺不一的花斑。
+  //   2. 每片貼紙自己的陰影、反光、立體感都還在，不是一塊平板灰。
+  // 中性的黑框不在任何一片貼紙的範圍內（被彩度保護擋掉），完全不受影響。
+  function grayFor(lum, meanLum, tr, tg, tb) {
+    const off = lum - meanLum;
+    return [tr + off, tg + off, tb + off];
   }
 
   // 邊界標示遮罩：只標出「真正被判定為格線、且緊鄰某個偵測到的色塊」的像素，
@@ -609,11 +612,13 @@ export function GrayscaleTool() {
     const ctx = canvas.getContext('2d');
     const w = st.workW, h = st.workH;
     const orig = st.workOriginal.data;
-    const desat = getDesatBuffer();
     const protect = st.protectMask;
     const label = st.resolvedLabelMask;
     const manual = st.manualOverride;
     const boundary = st.boundaryMask;
+    const meanLum = st.regionMeanLum;
+    const amt = desatPct / 100;
+    const { r: tr, g: tg, b: tb } = grayColor;
     const out = ctx.createImageData(w, h);
     const od = out.data;
     for (let i = 0; i < w * h; i++) {
@@ -625,9 +630,19 @@ export function GrayscaleTool() {
       else if (protect[i] === 1) alpha = 0;
       else if (!isKept(label[i])) alpha = 1;
       else alpha = 0;
-      od[k] = orig[k] + (desat[k] - orig[k]) * alpha;
-      od[k + 1] = orig[k + 1] + (desat[k + 1] - orig[k + 1]) * alpha;
-      od[k + 2] = orig[k + 2] + (desat[k + 2] - orig[k + 2]) * alpha;
+      if (alpha) {
+        const lum = 0.299 * orig[k] + 0.587 * orig[k + 1] + 0.114 * orig[k + 2];
+        // 手動筆刷可能塗在任何地方（不一定落在某片貼紙裡），沒有所屬貼紙時就退回
+        // 用像素自己的亮度當基準，等同單純的灰階
+        const lab = label[i];
+        const base = (meanLum && lab && meanLum[lab]) ? meanLum[lab] : lum;
+        const [gr, gg, gb] = grayFor(lum, base, tr, tg, tb);
+        od[k] = orig[k] + (gr - orig[k]) * amt;
+        od[k + 1] = orig[k + 1] + (gg - orig[k + 1]) * amt;
+        od[k + 2] = orig[k + 2] + (gb - orig[k + 2]) * amt;
+      } else {
+        od[k] = orig[k]; od[k + 1] = orig[k + 1]; od[k + 2] = orig[k + 2];
+      }
       od[k + 3] = 255;
       if (showLineMask && boundary && boundary[i]) {
         const a = 0.55;
@@ -654,6 +669,7 @@ export function GrayscaleTool() {
     const seg = grayFloodFillLabel(segLine, w, h, GRAY_MIN_AREA_FRAC, GRAY_MAX_AREA_FRAC);
     st.labelMask = seg.label;
     st.resolvedLabelMask = grayResolveUnknownLabels(rawLine, protect, seg.label, w, h);
+    st.regionMeanLum = grayComputeRegionMeanLum(st.workOriginal.data, st.resolvedLabelMask, protect, w * h, seg.numLabels);
     st.keep = new Map();
     computeBoundaryMask();
     setRegionCount(seg.count);
@@ -691,7 +707,7 @@ export function GrayscaleTool() {
     const wctx = wc.getContext('2d', { willReadFrequently: true });
     wctx.drawImage(st.img, 0, 0, st.workW, st.workH);
     st.workOriginal = wctx.getImageData(0, 0, st.workW, st.workH);
-    st.desatBuffer = null; st.desatBufferPct = null;
+    st.regionMeanLum = null;
     st.manualOverride = new Int8Array(st.workW * st.workH);
 
     const canvas = canvasRef.current;
@@ -858,6 +874,8 @@ export function GrayscaleTool() {
     // 變粗或變細，匯出結果跟預覽看到的一致。
     const protectNative = grayBuildChromaProtectMask(orig, n, st.chromaThreshold);
     const resolvedNative = grayResolveUnknownLabels(isLineNative, protectNative, seg.label, natW, natH);
+    // 每片貼紙的平均亮度也在原生解析度重算，讓「統一灰階」的基準跟預覽一致
+    const meanLumNative = grayComputeRegionMeanLum(orig, resolvedNative, protectNative, n, seg.numLabels);
 
     const workW = st.workW, workH = st.workH, workLabel = st.labelMask;
     const nativeToWork = new Int32Array(seg.numLabels);
@@ -873,28 +891,31 @@ export function GrayscaleTool() {
     const od = out.data;
     const amt = desatPct / 100;
     const { r: tr, g: tg, b: tb } = grayColor;
-    const tintLum = 0.299 * tr + 0.587 * tg + 0.114 * tb;
-    const dr = tr - tintLum, dg = tg - tintLum, db = tb - tintLum;
 
     for (let i = 0; i < n; i++) {
       const idx = i * 4;
       const r = orig[idx], g = orig[idx + 1], b = orig[idx + 2];
       const override = manualNative ? manualNative[i] : 0;
+      const nlab = resolvedNative[i];
       let alpha;
       if (override === -1) alpha = 0;
       else if (override === 1) alpha = 1;
       else if (protectNative[i] === 1) alpha = 0;
       else {
-        const nlab = resolvedNative[i];
         const wlab = nlab ? nativeToWork[nlab] : 0;
         alpha = !isKept(wlab) ? 1 : 0;
       }
-      // 跟預覽同一套「保留亮度的灰階」，見 computeDesatBuffer 的說明
-      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-      const gr = r + (lum + dr - r) * amt, gg = g + (lum + dg - g) * amt, gb = b + (lum + db - b) * amt;
-      od[idx] = r + (gr - r) * alpha;
-      od[idx + 1] = g + (gg - g) * alpha;
-      od[idx + 2] = b + (gb - b) * alpha;
+      if (alpha) {
+        // 跟預覽同一套：整片貼紙平移到統一灰階，保留各自明暗，見 grayFor 的說明
+        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+        const base = (nlab && meanLumNative[nlab]) ? meanLumNative[nlab] : lum;
+        const off2 = lum - base;
+        od[idx] = r + (tr + off2 - r) * amt;
+        od[idx + 1] = g + (tg + off2 - g) * amt;
+        od[idx + 2] = b + (tb + off2 - b) * amt;
+      } else {
+        od[idx] = r; od[idx + 1] = g; od[idx + 2] = b;
+      }
       od[idx + 3] = orig[idx + 3];
     }
     octx.putImageData(out, 0, 0);
