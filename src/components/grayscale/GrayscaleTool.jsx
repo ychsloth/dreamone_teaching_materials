@@ -474,6 +474,34 @@ export function grayResolveUnknownLabels(rawLine, protect, label, w, h) {
     if (y > 0) tryExpand(idx - w);
     if (y < h - 1) tryExpand(idx + w);
   }
+
+  // 第二階段：撿回「孤兒有色像素」。真實照片的黑框凹槽裡常有貼紙顏色的反光，這些
+  // 像素四面被中性的黑框包住，上面那輪擴散跨不過去，就變成沒有編號的紅點／紅線卡在
+  // 溝縫裡（實測一張真實 4x4 照片有 1619 個，肉眼就是幾條明顯的紅線）。
+  // 這裡讓編號可以「穿過」黑框再傳一小段，但只指派給仍然有彩度的像素——中性的黑框
+  // 本身永遠不會被指派，所以不管傳多遠都不可能把黑框灰階掉。傳遞距離依照片尺寸自
+  // 適應（不是固定 px），只夠跨過一條溝縫，不會把遠處的東西掃進來。
+  const maxDist = Math.max(2, Math.round(Math.min(w, h) * 0.012));
+  const dist = new Int32Array(n).fill(-1);
+  const carry = new Int32Array(n);
+  qHead = 0; qTail = 0;
+  for (let i = 0; i < n; i++) if (resolved[i]) { dist[i] = 0; carry[i] = resolved[i]; queue[qTail++] = i; }
+  while (qHead < qTail) {
+    const idx = queue[qHead++];
+    const d = dist[idx];
+    if (d >= maxDist) continue;
+    const lab = carry[idx];
+    const x = idx % w, y = (idx / w) | 0;
+    const step = (m) => {
+      if (dist[m] !== -1) return;
+      dist[m] = d + 1; carry[m] = lab; queue[qTail++] = m;
+      if (!protect[m] && !resolved[m]) resolved[m] = lab;
+    };
+    if (x > 0) step(idx - 1);
+    if (x < w - 1) step(idx + 1);
+    if (y > 0) step(idx - w);
+    if (y < h - 1) step(idx + w);
+  }
   return resolved;
 }
 
