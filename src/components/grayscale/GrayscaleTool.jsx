@@ -214,19 +214,38 @@ export function grayAdaptiveChromaThreshold(centroids, k) {
 }
 
 
-// 邊界／黑框保護遮罩：純粹用「這個像素還有沒有彩度」判斷，跟位置、跟離格線多遠
-// 完全無關，所以不受解析度、方塊大小、拍攝角度、黑框粗細影響。
-// 1 = 中性像素，維持原圖；0 = 還看得出顏色，可以被灰階。
-// 這樣黑框、黑框的抗鋸齒、溝槽、反光、陰影全部自動落在保護區裡；反過來說，任何
-// 「還帶著顏色」的像素都不可能被保護 → 顏色 halo 不可能殘留。
-export function grayBuildChromaProtectMask(data, n, threshold) {
+// 「多亮以上就不算黑框」的分界。白色貼紙跟黑框一樣都是沒有彩度的，只靠彩度分不
+// 開，會把白色貼紙也當成黑框保護起來、點了不會變灰。這裡再加一條亮度界線：黑框
+// 那一群的亮度當下限、照片裡最亮的無彩度群（通常就是白色貼紙）當上限，取中間當
+// 分界，暗的那半邊才算黑框。
+// 只有在照片裡真的存在「很亮的無彩度色塊」（L* > 70，代表有白色貼紙）時才啟用這
+// 條界線；不然（整顆方塊都是彩色貼紙）就維持只看彩度，避免把黑框上的反光誤放行。
+export function grayAdaptiveDarkThreshold(centroids, k, borderClusterId, chromaThreshold) {
+  const borderL = borderClusterId >= 0 ? centroids[borderClusterId * 3] : 0;
+  let brightestNeutralL = -1;
+  for (let c = 0; c < k; c++) {
+    const A = centroids[c * 3 + 1], B = centroids[c * 3 + 2];
+    if (Math.hypot(A, B) >= chromaThreshold) continue;
+    if (centroids[c * 3] > brightestNeutralL) brightestNeutralL = centroids[c * 3];
+  }
+  if (brightestNeutralL <= 70) return 101; // 沒有白色貼紙 → 不設亮度界線
+  return (borderL + brightestNeutralL) / 2;
+}
+
+
+// 邊界／黑框保護遮罩：用「這個像素還有沒有彩度」＋「夠不夠暗」判斷，跟位置、跟離
+// 格線多遠完全無關，所以不受解析度、方塊大小、拍攝角度、黑框粗細影響。
+// 1 = 黑框那類，維持原圖；0 = 還看得出顏色、或是亮的中性色塊（白色貼紙），可灰階。
+// 黑框、黑框的抗鋸齒、溝槽、陰影都會落在保護區裡；反過來說，任何「還帶著顏色」的
+// 像素都不可能被保護 → 顏色 halo 不可能殘留。
+export function grayBuildChromaProtectMask(data, n, threshold, darkThreshold = 101) {
   const mask = new Uint8Array(n);
   const t2 = threshold * threshold;
   for (let i = 0; i < n; i++) {
     const k = i * 4;
     const lab = grayRgbToLab(data[k], data[k + 1], data[k + 2]);
     const A = lab[1], B = lab[2];
-    mask[i] = A * A + B * B < t2 ? 1 : 0;
+    mask[i] = (A * A + B * B < t2 && lab[0] < darkThreshold) ? 1 : 0;
   }
   return mask;
 }
@@ -513,7 +532,9 @@ export function grayResolveUnknownLabels(rawLine, protect, label, w, h) {
     const step = (m) => {
       if (dist[m] !== -1) return;
       dist[m] = d + 1; carry[m] = lab; queue[qTail++] = m;
-      if (!protect[m] && !resolved[m]) resolved[m] = lab;
+      // 只補在格線遮罩內的像素：溝槽反光就落在這裡。限制在 rawLine 內，才不會把
+      // 方塊外圍的白色背景（同樣是亮的中性像素、已不受保護）也一起吸進某片貼紙。
+      if (rawLine[m] && !protect[m] && !resolved[m]) resolved[m] = lab;
     };
     if (x > 0) step(idx - 1);
     if (x < w - 1) step(idx + 1);
@@ -532,7 +553,7 @@ export function GrayscaleTool() {
   const stRef = useRef({
     img: null, natW: 0, natH: 0, workW: 0, workH: 0, workOriginal: null,
     clusterId: null, centroids: null, k: 0, borderClusterId: -1, borderManual: false,
-    lineMaskRaw: null, blackOnlyMask: null, boundaryMask: null, protectMask: null, chromaThreshold: 0,
+    lineMaskRaw: null, blackOnlyMask: null, boundaryMask: null, protectMask: null, chromaThreshold: 0, darkThreshold: 101,
     regionMeanLum: null,
     labelMask: null, resolvedLabelMask: null, keep: new Map(), manualOverride: null,
   });
@@ -664,7 +685,8 @@ export function GrayscaleTool() {
     st.lineMaskRaw = rawLine;
     st.blackOnlyMask = blackOnly;
     // 邊界／黑框保護：用彩度判斷，不用幾何距離，所以跟解析度、黑框粗細無關。
-    const protect = grayBuildChromaProtectMask(st.workOriginal.data, w * h, st.chromaThreshold);
+    st.darkThreshold = grayAdaptiveDarkThreshold(st.centroids, st.k, st.borderClusterId, st.chromaThreshold);
+    const protect = grayBuildChromaProtectMask(st.workOriginal.data, w * h, st.chromaThreshold, st.darkThreshold);
     st.protectMask = protect;
     const seg = grayFloodFillLabel(segLine, w, h, GRAY_MIN_AREA_FRAC, GRAY_MAX_AREA_FRAC);
     st.labelMask = seg.label;
@@ -872,7 +894,7 @@ export function GrayscaleTool() {
     // 保護遮罩用跟預覽同一個彩度門檻，在原生解析度上重算一次。因為判斷依據是
     // 「這個像素有沒有彩度」而不是「離格線幾個 pixel」，換解析度不會讓保護範圍
     // 變粗或變細，匯出結果跟預覽看到的一致。
-    const protectNative = grayBuildChromaProtectMask(orig, n, st.chromaThreshold);
+    const protectNative = grayBuildChromaProtectMask(orig, n, st.chromaThreshold, st.darkThreshold);
     const resolvedNative = grayResolveUnknownLabels(isLineNative, protectNative, seg.label, natW, natH);
     // 每片貼紙的平均亮度也在原生解析度重算，讓「統一灰階」的基準跟預覽一致
     const meanLumNative = grayComputeRegionMeanLum(orig, resolvedNative, protectNative, n, seg.numLabels);
