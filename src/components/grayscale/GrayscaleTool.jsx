@@ -251,24 +251,6 @@ export function grayBuildChromaProtectMask(data, n, threshold, darkThreshold = 1
 }
 
 
-// 每一片貼紙自己的平均亮度。灰階時用「這片貼紙的平均」當基準，把整片平移到統一的
-// 灰階值，就能做到：白色貼紙跟紅色貼紙灰掉之後深淺一樣，但各自原本的明暗起伏都
-// 留著。只統計真的會被灰階的像素（跳過中性的黑框），平均值才不會被黑框拉低。
-export function grayComputeRegionMeanLum(data, resolved, protect, n, numLabels) {
-  const sum = new Float64Array(numLabels), cnt = new Float64Array(numLabels);
-  for (let i = 0; i < n; i++) {
-    const l = resolved[i];
-    if (!l || protect[i]) continue;
-    const j = i * 4;
-    sum[l] += 0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2];
-    cnt[l]++;
-  }
-  const mean = new Float32Array(numLabels);
-  for (let l = 1; l < numLabels; l++) mean[l] = cnt[l] ? sum[l] / cnt[l] : 0;
-  return mean;
-}
-
-
 // 找一小塊區域裡出現最多次的值（眾數），給「點擊指定黑框位置」用：取一小塊區域
 // 而不是單一像素，避免剛好點到反光或邊緣噪點所在的那個群
 export function grayMode(arr) {
@@ -482,59 +464,205 @@ export function grayFloodFillLabel(isLine, w, h, minAreaFrac, maxAreaFrac) {
     centroidX[l] = sumX[l] / areas[l]; centroidY[l] = sumY[l] / areas[l];
     if (areas[l] >= minArea && areas[l] <= maxArea && !touchesBorder[l]) { valid[l] = 1; count++; }
   }
+  // background：碰到照片外框、或大到不可能是貼紙的區塊。之後把貼紙範圍往外補齊時，
+  // 絕對不能補進這裡（不然白色貼紙旁邊的白色背景會被一起灰掉）
+  const background = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const l = label[i];
+    if (l && !valid[l] && (touchesBorder[l] || areas[l] > maxArea)) background[i] = 1;
+  }
   for (let i = 0; i < n; i++) { if (label[i] && !valid[label[i]]) label[i] = 0; }
-  return { label, count, centroidX, centroidY, numLabels: nextLabel };
+  return { label, count, centroidX, centroidY, numLabels: nextLabel, background };
 }
 
 
-// 把「落在格線遮罩裡、但其實還帶著顏色」的像素，就近併入旁邊那顆貼紙的分組
-// （4方向 BFS）。擴散的阻擋條件是 protect（中性像素＝黑框／邊界），不是「被分到
-// 黑框那一群」——關鍵差別在這裡：一個 50% 紅 + 50% 黑的抗鋸齒像素是深紅色，很容易
-// 被分到黑框那一群，用舊條件就會卡在這裡拿不到編號、永遠保留原本的紅色（halo 的
-// 來源之一）；用彩度判斷它就會被正確吸收進紅色貼紙，跟著一起灰階。
-// 因為只在 rawLine 內擴散、又被中性的黑框擋住，不會跨過真實格線把兩顆貼紙混在一起。
-export function grayResolveUnknownLabels(rawLine, protect, label, w, h) {
-  const n = w * h;
-  const resolved = label.slice();
-  const queue = new Int32Array(n);
-  let qHead = 0, qTail = 0;
-  for (let i = 0; i < n; i++) if (label[i]) queue[qTail++] = i;
-  while (qHead < qTail) {
-    const idx = queue[qHead++];
-    const lab = resolved[idx];
-    const x = idx % w, y = (idx / w) | 0;
-    const tryExpand = (m) => {
-      if (rawLine[m] && !protect[m] && !resolved[m]) { resolved[m] = lab; queue[qTail++] = m; }
-    };
-    if (x > 0) tryExpand(idx - 1);
-    if (x < w - 1) tryExpand(idx + 1);
-    if (y > 0) tryExpand(idx - w);
-    if (y < h - 1) tryExpand(idx + w);
-  }
+// ============================================================================
+// 「點一片貼紙 → 只有這片貼紙變灰」的核心：決定「哪些像素屬於這片貼紙」，以及
+// 「每個像素有多少比例是貼紙本身」。
+//
+// 舊做法只靠格線分割出來的區塊決定哪些像素要灰。可是分割用的格線遮罩是為了「把
+// 貼紙彼此分開」設計的，會把不少其實還是貼紙顏色的像素也當成格線：凸起貼紙顏色
+// 較深的斜面（被切成另一個小區塊、面積太小被丟掉）、貼紙內部因光線漸層切出的雜點
+// （被補洞步驟填成一小團）、貼紙邊緣被補洞步驟吃進格線的一圈。這些像素不屬於任何
+// 貼紙，點了也不會灰，就留下黃色小點、藍色月牙、藍色虛線。
+// 另外，統一灰階是把整片貼紙的亮度平移一個固定量，邊緣「一半貼紙一半黑框」的過渡
+// 像素也被平移全額，跟旁邊沒動的黑框接不起來，變成一圈深色或淺色的描邊。
+//
+// 新做法拆成兩件事，都不用固定 pixel 距離、不管黑框多粗：
+//   1. 範圍（grayAssignStickerPixels）：從每片貼紙往外長，只要「不是黑框、不是背景、
+//      顏色跟這片貼紙一致」就收進來，被格線遮罩吃掉的貼紙色像素全部歸隊。
+//   2. 比例（grayComputeStickerAlpha）：每個像素算一個 0～1 的「貼紙成分」α。
+//      黑框是中性色，貼紙跟中性色混在一起時，RGB 的色差（最大值−最小值）剛好等比例
+//      變小，所以 α = 這個像素的色差 ÷ 貼紙本身的色差：貼紙內部 α=1、黑框 α=0、交界
+//      的抗鋸齒像素介於中間。灰階時顏色全部拿掉，亮度的平移量乘上 α：
+//         結果 = 像素亮度 + α ×（統一灰階 − 這片貼紙的平均亮度）
+//      交界像素裡「貼紙那一份」的顏色被完全去掉（不會有 halo），「黑框那一份」的亮度
+//      原封不動（黑框不會被吃掉、也不會多一圈描邊）；貼紙內部 α=1，跟以前一樣平移到
+//      統一的灰。
+// ============================================================================
 
-  // 第二階段：撿回「孤兒有色像素」。真實照片的黑框凹槽裡常有貼紙顏色的反光，這些
-  // 像素四面被中性的黑框包住，上面那輪擴散跨不過去，就變成沒有編號的紅點／紅線卡在
-  // 溝縫裡（實測一張真實 4x4 照片有 1619 個，肉眼就是幾條明顯的紅線）。
-  // 這裡讓編號可以「穿過」黑框再傳一小段，但只指派給仍然有彩度的像素——中性的黑框
-  // 本身永遠不會被指派，所以不管傳多遠都不可能把黑框灰階掉。傳遞距離依照片尺寸自
-  // 適應（不是固定 px），只夠跨過一條溝縫，不會把遠處的東西掃進來。
-  const maxDist = Math.max(2, Math.round(Math.min(w, h) * 0.012));
-  const dist = new Int32Array(n).fill(-1);
-  const carry = new Int32Array(n);
-  qHead = 0; qTail = 0;
-  for (let i = 0; i < n; i++) if (resolved[i]) { dist[i] = 0; carry[i] = resolved[i]; queue[qTail++] = i; }
+// 跟貼紙色相差多少度以內算「同一個顏色」（凸起斜面、陰影、反光的色相都跟貼紙本體
+// 一致，只是明暗不同；不同顏色的貼紙色相至少差這麼多）。
+// 越暗的像素容許差越多，最暗時到 GRAY_HUE_TOLERANCE_DARK_DEG：貼紙邊緣越接近黑框，
+// 顏色就越被黑框本身的色偏主導（例如黃色貼紙貼著偏藍的黑框，溝槽裡會變成墨綠色），
+// 色相已經不可靠，但它仍然是這片貼紙的邊緣。
+export const GRAY_HUE_TOLERANCE_DEG = 35;
+export const GRAY_HUE_TOLERANCE_DARK_DEG = 90;
+
+// 中性灰（R=G=B）在 CIE L* 為 L 時的 sRGB 值：把「L* 亮度界線」換算成像素亮度
+export function grayNeutralValueForL(L) {
+  const fy = (L + 16) / 116;
+  const Y = L > 8 ? fy * fy * fy : L / 903.3;
+  const v = Y <= 0.0031308 ? 12.92 * Y : 1.055 * Math.pow(Y, 1 / 2.4) - 0.055;
+  return Math.max(0, Math.min(255, v * 255));
+}
+
+function grayHistPercentile(hist, base, total, frac) {
+  const target = total * frac;
+  let acc = 0;
+  for (let v = 0; v < 256; v++) { acc += hist[base + v]; if (acc >= target) return v; }
+  return 255;
+}
+
+// 每片貼紙的「標準色」，只統計貼紙本體（分割出的區塊、扣掉黑框類像素）：
+//   meanLum    平均亮度，統一灰階的平移基準
+//   refL       平均的 Lab 明度（L*），判斷旁邊的像素比貼紙暗多少
+//   refA/refB  平均的 Lab 色相方向，判斷旁邊的像素是不是同一個顏色
+//   chromatic  這片貼紙有沒有顏色（白色貼紙沒有，α 改用亮度判斷）
+//   cRef       色差（最大值−最小值）的第 25 百分位：色差到這裡以上都算「完整的貼紙」，
+//              所以貼紙內部幾乎都是 α=1，只有比貼紙本體還淡、還暗的過渡像素 α<1
+//   lumRef     亮度的第 25 百分位（白色貼紙用，意義同上）
+//   seed       這個區塊是不是真的貼紙、可以往外長（見下面 grayAssignStickerPixels）。
+//              分割偶爾會把一大片黑框也切成一個「區塊」，裡面只有零星幾個帶色的反光像素；
+//              這種區塊如果也往外長，會搶走隔壁貼紙最外圈的像素，點貼紙時那圈就灰不掉。
+//              所以只有「大部分是貼紙表面」（白色貼紙也算），或「明顯有顏色、而且至少兩成
+//              是貼紙表面」（很深的藍色貼紙會有不少像素暗到跟黑框一樣）的區塊才算貼紙。
+export function grayComputeStickerStats(data, label, protect, n, numLabels, chromaThreshold) {
+  const cnt = new Float64Array(numLabels), total = new Float64Array(numLabels);
+  for (let i = 0; i < n; i++) { const l = label[i]; if (!l) continue; total[l]++; if (!protect[i]) cnt[l]++; }
+  const slot = new Int32Array(numLabels).fill(-1);
+  let slots = 0;
+  for (let l = 1; l < numLabels; l++) if (cnt[l]) slot[l] = slots++;
+  const sumLum = new Float64Array(numLabels), sumL = new Float64Array(numLabels);
+  const sumA = new Float64Array(numLabels), sumB = new Float64Array(numLabels);
+  const histC = new Uint32Array(slots * 256), histL = new Uint32Array(slots * 256);
+  for (let i = 0; i < n; i++) {
+    const l = label[i];
+    if (!l || protect[i]) continue;
+    const k = i * 4, r = data[k], g = data[k + 1], b = data[k + 2];
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    const lab = grayRgbToLab(r, g, b);
+    sumLum[l] += lum; sumL[l] += lab[0]; sumA[l] += lab[1]; sumB[l] += lab[2];
+    histC[slot[l] * 256 + (Math.max(r, g, b) - Math.min(r, g, b))]++;
+    histL[slot[l] * 256 + Math.min(255, Math.round(lum))]++;
+  }
+  const meanLum = new Float32Array(numLabels), refL = new Float32Array(numLabels);
+  const refA = new Float32Array(numLabels), refB = new Float32Array(numLabels);
+  const cRef = new Float32Array(numLabels), lumRef = new Float32Array(numLabels);
+  const chromatic = new Uint8Array(numLabels), seed = new Uint8Array(numLabels);
+  for (let l = 1; l < numLabels; l++) {
+    if (!cnt[l]) continue;
+    meanLum[l] = sumLum[l] / cnt[l];
+    refL[l] = sumL[l] / cnt[l]; refA[l] = sumA[l] / cnt[l]; refB[l] = sumB[l] / cnt[l];
+    chromatic[l] = Math.hypot(refA[l], refB[l]) > chromaThreshold * 2 ? 1 : 0;
+    cRef[l] = Math.max(1, grayHistPercentile(histC, slot[l] * 256, cnt[l], 0.25));
+    lumRef[l] = grayHistPercentile(histL, slot[l] * 256, cnt[l], 0.25);
+    const surface = cnt[l] / total[l];
+    seed[l] = surface > 0.5 || (chromatic[l] && surface >= 0.2) ? 1 : 0;
+  }
+  return { meanLum, refL, refA, refB, chromatic, cRef, lumRef, seed, area: cnt };
+}
+
+// 像素（Lab）的顏色跟第 l 片貼紙一不一致：
+//   ‧ 白色貼紙：只收幾乎沒有彩度的像素，有顏色的一律不收
+//   ‧ 彩色貼紙：幾乎沒彩度的像素（抗鋸齒、反光）直接收；有彩度的要色相接近，
+//     容許的色相差依「比貼紙暗多少」放寬（見 GRAY_HUE_TOLERANCE_DARK_DEG）
+function grayColorFits(stats, l, L, A, B, weakChroma) {
+  const c = Math.hypot(A, B);
+  if (!stats.chromatic[l]) return c < weakChroma;
+  if (c < weakChroma) return true;
+  const refL = stats.refL[l];
+  const dark = refL > 0 ? Math.min(1, Math.max(0, 1 - L / refL)) : 0;
+  const tol = GRAY_HUE_TOLERANCE_DEG + (GRAY_HUE_TOLERANCE_DARK_DEG - GRAY_HUE_TOLERANCE_DEG) * dark;
+  const ra = stats.refA[l], rb = stats.refB[l];
+  return A * ra + B * rb >= Math.cos((tol * Math.PI) / 180) * c * Math.hypot(ra, rb);
+}
+
+// 每個像素屬於哪一片貼紙（0 = 不屬於任何貼紙，永遠維持原圖）。
+// 第一階段：從每片貼紙同時往外長（4 方向 BFS），收進「不是黑框類、不是背景、顏色
+// 一致」的像素。黑框類像素擋住擴散，所以不會越過真正的格線跑到隔壁貼紙；顏色不一
+// 致的像素這一片不收，但留給其他貼紙的擴散去收。擴散距離的上限依貼紙實際大小自適
+// 應（不是固定 px）。
+// 第二階段：撿回溝槽裡的「孤兒有色像素」（貼紙顏色映在黑框凹槽裡的反光，四面被黑
+// 框包住）。允許編號穿過黑框再傳一小段，但只指派給格線上（lineMask）、還看得出顏色、
+// 且顏色一致的像素：黑框本身永遠不會被指派，隔壁另一塊色塊的內部也不會被吃進來。
+export function grayAssignStickerPixels(data, w, h, label, protect, background, lineMask, stats, chromaThreshold) {
+  const n = w * h;
+  // 只有真的貼紙（stats.seed）當起點；黑框區塊的像素先清成 0，讓旁邊的貼紙收
+  const resolved = new Int32Array(n);
+  for (let i = 0; i < n; i++) { const l = label[i]; if (l && stats.seed[l]) resolved[i] = l; }
+  const weak = chromaThreshold * 1.5;
+  // 每個像素的 Lab 只在第一次用到時算一次，存成整數（精度 1 已經足夠判斷色相／彩度），
+  // 大張照片匯出時記憶體才不會暴增
+  const labL = new Uint8Array(n), labA = new Int8Array(n), labB = new Int8Array(n), hasLab = new Uint8Array(n);
+  const fits = (m, l) => {
+    if (!hasLab[m]) {
+      const k = m * 4, lab = grayRgbToLab(data[k], data[k + 1], data[k + 2]);
+      labL[m] = Math.round(lab[0]); labA[m] = Math.round(lab[1]); labB[m] = Math.round(lab[2]); hasLab[m] = 1;
+    }
+    return grayColorFits(stats, l, labL[m], labA[m], labB[m], weak);
+  };
+
+  const areas = [];
+  for (let l = 1; l < stats.area.length; l++) if (stats.seed[l]) areas.push(stats.area[l]);
+  areas.sort((a, b) => a - b);
+  // 最多往外長「一片貼紙的寬度」：光線漸層常把一片貼紙切成好幾塊，只有其中一塊被
+  // 認成區塊，其餘碎片要從那一塊一路長過去；擴散本來就會被黑框、背景、不同顏色擋住，
+  // 這個上限只是保險，避免異常照片一路長到很遠的地方
+  const typicalSide = areas.length ? Math.sqrt(areas[areas.length >> 1]) : Math.min(w, h) * 0.1;
+  const reach = Math.max(3, Math.round(typicalSide));
+
+  const queue = new Int32Array(n);
+  const dist = new Int32Array(n);
+  let qHead = 0, qTail = 0;
+  for (let i = 0; i < n; i++) if (resolved[i]) queue[qTail++] = i;
   while (qHead < qTail) {
     const idx = queue[qHead++];
     const d = dist[idx];
-    if (d >= maxDist) continue;
-    const lab = carry[idx];
+    if (d >= reach) continue;
+    const l = resolved[idx];
+    const x = idx % w, y = (idx / w) | 0;
+    const grow = (m) => {
+      if (resolved[m] || protect[m] || !fits(m, l)) return;
+      // 背景裡只收「明顯帶著這片貼紙顏色」的像素：貼紙直接貼著背景（沒有黑框隔開）時，
+      // 交界那一條抗鋸齒像素會被分割算成背景。白色／灰色背景本身幾乎沒有彩度，一律不收，
+      // 所以不會把背景灰掉。
+      if (background[m] && !(stats.chromatic[l] && labA[m] * labA[m] + labB[m] * labB[m] >= weak * weak)) return;
+      resolved[m] = l; dist[m] = d + 1; queue[qTail++] = m;
+    };
+    if (x > 0) grow(idx - 1);
+    if (x < w - 1) grow(idx + 1);
+    if (y > 0) grow(idx - w);
+    if (y < h - 1) grow(idx + w);
+  }
+
+  const maxHop = Math.max(2, Math.round(Math.min(w, h) * 0.012));
+  const hop = dist.fill(-1); // 第一階段的距離用完了，直接拿來重用
+  const carry = new Int32Array(n);
+  const t2 = chromaThreshold * chromaThreshold;
+  qHead = 0; qTail = 0;
+  for (let i = 0; i < n; i++) if (resolved[i]) { hop[i] = 0; carry[i] = resolved[i]; queue[qTail++] = i; }
+  while (qHead < qTail) {
+    const idx = queue[qHead++];
+    const d = hop[idx];
+    if (d >= maxHop) continue;
+    const l = carry[idx];
     const x = idx % w, y = (idx / w) | 0;
     const step = (m) => {
-      if (dist[m] !== -1) return;
-      dist[m] = d + 1; carry[m] = lab; queue[qTail++] = m;
-      // 只補在格線遮罩內的像素：溝槽反光就落在這裡。限制在 rawLine 內，才不會把
-      // 方塊外圍的白色背景（同樣是亮的中性像素、已不受保護）也一起吸進某片貼紙。
-      if (rawLine[m] && !protect[m] && !resolved[m]) resolved[m] = lab;
+      if (hop[m] !== -1 || background[m]) return;
+      hop[m] = d + 1; carry[m] = l; queue[qTail++] = m;
+      if (resolved[m] || protect[m] || !lineMask[m] || !fits(m, l)) return;
+      if (labA[m] * labA[m] + labB[m] * labB[m] >= t2) resolved[m] = l;
     };
     if (x > 0) step(idx - 1);
     if (x < w - 1) step(idx + 1);
@@ -542,6 +670,85 @@ export function grayResolveUnknownLabels(rawLine, protect, label, w, h) {
     if (y < h - 1) step(idx + w);
   }
   return resolved;
+}
+
+// 每個像素的「貼紙成分」α（0～1），見上面的說明。黑框類像素、不屬於任何貼紙的像素
+// 都是 0（而且合成時根本不會碰它們）。
+//   彩色貼紙：α = 色差 ÷ 貼紙本體色差。跟任何中性色（黑框、灰色斜面、白色反光）混合
+//             都會讓色差等比例縮小，所以不管黑框多亮多暗，這個比例都成立。
+//   白色貼紙：沒有色差可以看，改用亮度：從「黑框保護的亮度界線」到貼紙本體亮度之間
+//             線性變化，剛好在保護界線上是 0，跟旁邊原封不動的黑框接得起來。
+export function grayComputeStickerAlpha(data, n, resolved, protect, stats, lumCut) {
+  const alpha = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const l = resolved[i];
+    if (!l || protect[i]) continue;
+    const k = i * 4, r = data[k], g = data[k + 1], b = data[k + 2];
+    let a;
+    if (stats.chromatic[l]) {
+      a = (Math.max(r, g, b) - Math.min(r, g, b)) / stats.cRef[l];
+    } else {
+      const span = stats.lumRef[l] - lumCut;
+      a = span > 1 ? (0.299 * r + 0.587 * g + 0.114 * b - lumCut) / span : 1;
+    }
+    alpha[i] = a < 0 ? 0 : a > 1 ? 1 : a;
+  }
+  return alpha;
+}
+
+// 從格線遮罩到「每個像素屬於哪片貼紙、α 多少」的完整流程。預覽跟匯出（原生解析度）
+// 都呼叫這一個函式，兩邊的判斷保證一模一樣。
+export function grayBuildStickerModel(data, w, h, segLine, protect, chromaThreshold, darkThreshold) {
+  const n = w * h;
+  const seg = grayFloodFillLabel(segLine, w, h, GRAY_MIN_AREA_FRAC, GRAY_MAX_AREA_FRAC);
+  const stats = grayComputeStickerStats(data, seg.label, protect, n, seg.numLabels, chromaThreshold);
+  // 背景：去背的透明 PNG 就以「完全透明」的像素為準。透明像素讀出來是 (0,0,0)，
+  // 常常跟深色貼紙的邊緣被分在同一群、中間沒有格線，分割時會把貼紙邊緣一起算進
+  // 「碰到照片外框的區塊」；用分割結果當背景的話，那圈邊緣就永遠不會被灰掉。
+  // 沒有透明像素的照片（白底等）才用分割結果判斷背景。
+  let background = seg.background;
+  for (let i = 0; i < n; i++) {
+    if (data[i * 4 + 3] === 0) {
+      background = new Uint8Array(n);
+      for (let j = i; j < n; j++) if (data[j * 4 + 3] === 0) background[j] = 1;
+      break;
+    }
+  }
+  const resolved = grayAssignStickerPixels(data, w, h, seg.label, protect, background, segLine, stats, chromaThreshold);
+  // 沒有白色貼紙時（darkThreshold=101）黑框保護不看亮度，白色貼紙的 α 也用不到，
+  // 給一個中間值就好
+  const lumCut = grayNeutralValueForL(darkThreshold <= 100 ? darkThreshold : 50);
+  const alpha = grayComputeStickerAlpha(data, n, resolved, protect, stats, lumCut);
+  return { seg, resolved, alpha, meanLum: stats.meanLum };
+}
+
+// 最終合成，預覽跟匯出共用：
+//   grayMask = 屬於被點的貼紙  AND  NOT 黑框類像素（protect）
+// 被灰階的像素：顏色全部拿掉，亮度 = 原亮度 + α ×（統一灰階 − 貼紙平均亮度）。
+// 手動筆刷優先權最高：塗「降低彩度」的地方 α 視為 1，塗「還原」的地方維持原圖。
+export function grayComposite(out, orig, n, model, protect, isGreyLabel, manual, amt, tint, keepAlpha) {
+  const { resolved, alpha, meanLum } = model;
+  for (let i = 0; i < n; i++) {
+    const k = i * 4;
+    const r = orig[k], g = orig[k + 1], b = orig[k + 2];
+    const override = manual ? manual[i] : 0;
+    const l = resolved[i];
+    let a = -1;
+    if (override === 1) a = 1;
+    else if (override !== -1 && l && !protect[i] && isGreyLabel(l)) a = alpha[i];
+    if (a >= 0) {
+      const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+      // 手動筆刷可能塗在任何地方（不一定落在某片貼紙裡），沒有所屬貼紙時就用像素自己
+      // 的亮度當基準
+      const base = l && meanLum[l] ? meanLum[l] : lum;
+      out[k] = r + (lum + a * (tint.r - base) - r) * amt;
+      out[k + 1] = g + (lum + a * (tint.g - base) - g) * amt;
+      out[k + 2] = b + (lum + a * (tint.b - base) - b) * amt;
+    } else {
+      out[k] = r; out[k + 1] = g; out[k + 2] = b;
+    }
+    out[k + 3] = keepAlpha ? orig[k + 3] : 255;
+  }
 }
 
 
@@ -554,7 +761,7 @@ export function GrayscaleTool() {
     img: null, natW: 0, natH: 0, workW: 0, workH: 0, workOriginal: null,
     clusterId: null, centroids: null, k: 0, borderClusterId: -1, borderManual: false,
     lineMaskRaw: null, blackOnlyMask: null, boundaryMask: null, protectMask: null, chromaThreshold: 0, darkThreshold: 101,
-    regionMeanLum: null,
+    stickerModel: null,
     labelMask: null, resolvedLabelMask: null, keep: new Map(), manualOverride: null,
   });
   const st = stRef.current;
@@ -588,19 +795,6 @@ export function GrayscaleTool() {
     return v === undefined ? true : v;
   }
 
-  // 一片貼紙灰階後應該長什麼樣：
-  //     結果 = 統一灰階顏色 + （這個像素的亮度 − 這片貼紙的平均亮度）
-  // 也就是把整片貼紙「平移」到使用者選的那個灰（預設 #8c8c8c），但每個像素相對於
-  // 整片的明暗差原封不動保留下來。這樣可以同時滿足兩件事：
-  //   1. 不管原本是白色、黃色還是深紅，灰掉之後深淺一致——方塊打亂後、同一張圖上
-  //      有好幾種顏色被灰掉時，才不會變成一片深淺不一的花斑。
-  //   2. 每片貼紙自己的陰影、反光、立體感都還在，不是一塊平板灰。
-  // 中性的黑框不在任何一片貼紙的範圍內（被彩度保護擋掉），完全不受影響。
-  function grayFor(lum, meanLum, tr, tg, tb) {
-    const off = lum - meanLum;
-    return [tr + off, tg + off, tb + off];
-  }
-
   // 邊界標示遮罩：只標出「真正被判定為格線、且緊鄰某個偵測到的色塊」的像素，
   // 用來畫細線提示；不會包含大片背景，避免整張圖被塗滿
   function computeBoundaryMask() {
@@ -622,51 +816,24 @@ export function GrayscaleTool() {
     st.boundaryMask = boundary;
   }
 
-  // 即時預覽合成。最終的灰階遮罩就是：
-  //     grayMask = 屬於使用者點的那顆貼紙  AND  NOT 中性像素（黑框／邊界保護）
-  // 手動筆刷 override 優先權最高（使用者自己畫的範圍就照畫的來）。
-  // 沒有任何「往內縮 N 個 pixel」的步驟——邊界保護完全由彩度決定，見
-  // grayBuildChromaProtectMask。
+  // 即時預覽合成，邏輯在 grayComposite（跟匯出共用）：
+  //     grayMask = 屬於使用者點的那顆貼紙  AND  NOT 黑框類像素
+  // 交界像素依「貼紙成分」α 只處理貼紙那一份，沒有任何「往內縮 N 個 pixel」的步驟。
   function renderPreview() {
     const canvas = canvasRef.current;
-    if (!canvas || !st.workOriginal) return;
+    if (!canvas || !st.workOriginal || !st.stickerModel) return;
     const ctx = canvas.getContext('2d');
     const w = st.workW, h = st.workH;
-    const orig = st.workOriginal.data;
-    const protect = st.protectMask;
-    const label = st.resolvedLabelMask;
-    const manual = st.manualOverride;
     const boundary = st.boundaryMask;
-    const meanLum = st.regionMeanLum;
-    const amt = desatPct / 100;
-    const { r: tr, g: tg, b: tb } = grayColor;
     const out = ctx.createImageData(w, h);
     const od = out.data;
-    for (let i = 0; i < w * h; i++) {
-      const k = i * 4;
-      const override = manual ? manual[i] : 0;
-      let alpha;
-      if (override === -1) alpha = 0;
-      else if (override === 1) alpha = 1;
-      else if (protect[i] === 1) alpha = 0;
-      else if (!isKept(label[i])) alpha = 1;
-      else alpha = 0;
-      if (alpha) {
-        const lum = 0.299 * orig[k] + 0.587 * orig[k + 1] + 0.114 * orig[k + 2];
-        // 手動筆刷可能塗在任何地方（不一定落在某片貼紙裡），沒有所屬貼紙時就退回
-        // 用像素自己的亮度當基準，等同單純的灰階
-        const lab = label[i];
-        const base = (meanLum && lab && meanLum[lab]) ? meanLum[lab] : lum;
-        const [gr, gg, gb] = grayFor(lum, base, tr, tg, tb);
-        od[k] = orig[k] + (gr - orig[k]) * amt;
-        od[k + 1] = orig[k + 1] + (gg - orig[k + 1]) * amt;
-        od[k + 2] = orig[k + 2] + (gb - orig[k + 2]) * amt;
-      } else {
-        od[k] = orig[k]; od[k + 1] = orig[k + 1]; od[k + 2] = orig[k + 2];
-      }
-      od[k + 3] = 255;
-      if (showLineMask && boundary && boundary[i]) {
-        const a = 0.55;
+    grayComposite(od, st.workOriginal.data, w * h, st.stickerModel, st.protectMask,
+      (l) => !isKept(l), st.manualOverride, desatPct / 100, grayColor, false);
+    if (showLineMask && boundary) {
+      const a = 0.55;
+      for (let i = 0; i < w * h; i++) {
+        if (!boundary[i]) continue;
+        const k = i * 4;
         od[k] = od[k] * (1 - a) + 0 * a;
         od[k + 1] = od[k + 1] * (1 - a) + 229 * a;
         od[k + 2] = od[k + 2] * (1 - a) + 255 * a;
@@ -688,10 +855,11 @@ export function GrayscaleTool() {
     st.darkThreshold = grayAdaptiveDarkThreshold(st.centroids, st.k, st.borderClusterId, st.chromaThreshold);
     const protect = grayBuildChromaProtectMask(st.workOriginal.data, w * h, st.chromaThreshold, st.darkThreshold);
     st.protectMask = protect;
-    const seg = grayFloodFillLabel(segLine, w, h, GRAY_MIN_AREA_FRAC, GRAY_MAX_AREA_FRAC);
+    const model = grayBuildStickerModel(st.workOriginal.data, w, h, segLine, protect, st.chromaThreshold, st.darkThreshold);
+    const seg = model.seg;
+    st.stickerModel = model;
     st.labelMask = seg.label;
-    st.resolvedLabelMask = grayResolveUnknownLabels(rawLine, protect, seg.label, w, h);
-    st.regionMeanLum = grayComputeRegionMeanLum(st.workOriginal.data, st.resolvedLabelMask, protect, w * h, seg.numLabels);
+    st.resolvedLabelMask = model.resolved;
     st.keep = new Map();
     computeBoundaryMask();
     setRegionCount(seg.count);
@@ -729,7 +897,7 @@ export function GrayscaleTool() {
     const wctx = wc.getContext('2d', { willReadFrequently: true });
     wctx.drawImage(st.img, 0, 0, st.workW, st.workH);
     st.workOriginal = wctx.getImageData(0, 0, st.workW, st.workH);
-    st.regionMeanLum = null;
+    st.stickerModel = null;
     st.manualOverride = new Int8Array(st.workW * st.workH);
 
     const canvas = canvasRef.current;
@@ -889,17 +1057,18 @@ export function GrayscaleTool() {
 
     const nativeClusterId = grayAssignWithCentroids(orig, n, st.centroids, st.k);
     const edgeMask = auxDetectionMode ? grayBuildEdgeMask(orig, natW, natH, GRAY_EDGE_THRESHOLD) : null;
-    const { rawLine: isLineNative, segLine } = grayBuildLineMaskFromClusters(nativeClusterId, natW, natH, st.borderClusterId, edgeMask);
-    const seg = grayFloodFillLabel(segLine, natW, natH, GRAY_MIN_AREA_FRAC, GRAY_MAX_AREA_FRAC);
+    const { segLine } = grayBuildLineMaskFromClusters(nativeClusterId, natW, natH, st.borderClusterId, edgeMask);
     // 保護遮罩用跟預覽同一個彩度門檻，在原生解析度上重算一次。因為判斷依據是
     // 「這個像素有沒有彩度」而不是「離格線幾個 pixel」，換解析度不會讓保護範圍
     // 變粗或變細，匯出結果跟預覽看到的一致。
     const protectNative = grayBuildChromaProtectMask(orig, n, st.chromaThreshold, st.darkThreshold);
-    const resolvedNative = grayResolveUnknownLabels(isLineNative, protectNative, seg.label, natW, natH);
-    // 每片貼紙的平均亮度也在原生解析度重算，讓「統一灰階」的基準跟預覽一致
-    const meanLumNative = grayComputeRegionMeanLum(orig, resolvedNative, protectNative, n, seg.numLabels);
+    // 貼紙範圍、α、平均亮度都在原生解析度用同一個函式重算，跟預覽的判斷一致
+    const model = grayBuildStickerModel(orig, natW, natH, segLine, protectNative, st.chromaThreshold, st.darkThreshold);
+    const seg = model.seg;
 
-    const workW = st.workW, workH = st.workH, workLabel = st.labelMask;
+    // 用預覽的「貼紙範圍」查（不是分割區塊）：中心點剛好落在貼紙裡被格線切出來的碎片上
+    // 時，分割區塊是 0，範圍則已經把碎片歸回那片貼紙
+    const workW = st.workW, workH = st.workH, workLabel = st.resolvedLabelMask;
     const nativeToWork = new Int32Array(seg.numLabels);
     for (let l = 1; l < seg.numLabels; l++) {
       const wx = Math.min(workW - 1, Math.max(0, Math.round((seg.centroidX[l] * workW) / natW)));
@@ -910,36 +1079,9 @@ export function GrayscaleTool() {
     const manualNative = scaleManualOverrideToNative(natW, natH);
 
     const out = octx.createImageData(natW, natH);
-    const od = out.data;
-    const amt = desatPct / 100;
-    const { r: tr, g: tg, b: tb } = grayColor;
-
-    for (let i = 0; i < n; i++) {
-      const idx = i * 4;
-      const r = orig[idx], g = orig[idx + 1], b = orig[idx + 2];
-      const override = manualNative ? manualNative[i] : 0;
-      const nlab = resolvedNative[i];
-      let alpha;
-      if (override === -1) alpha = 0;
-      else if (override === 1) alpha = 1;
-      else if (protectNative[i] === 1) alpha = 0;
-      else {
-        const wlab = nlab ? nativeToWork[nlab] : 0;
-        alpha = !isKept(wlab) ? 1 : 0;
-      }
-      if (alpha) {
-        // 跟預覽同一套：整片貼紙平移到統一灰階，保留各自明暗，見 grayFor 的說明
-        const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-        const base = (nlab && meanLumNative[nlab]) ? meanLumNative[nlab] : lum;
-        const off2 = lum - base;
-        od[idx] = r + (tr + off2 - r) * amt;
-        od[idx + 1] = g + (tg + off2 - g) * amt;
-        od[idx + 2] = b + (tb + off2 - b) * amt;
-      } else {
-        od[idx] = r; od[idx + 1] = g; od[idx + 2] = b;
-      }
-      od[idx + 3] = orig[idx + 3];
-    }
+    // 跟預覽同一段合成；原生區塊編號先換回預覽的編號，才查得到使用者點過哪幾片
+    grayComposite(out.data, orig, n, model, protectNative, (l) => !isKept(nativeToWork[l]),
+      manualNative, desatPct / 100, grayColor, true);
     octx.putImageData(out, 0, 0);
     off.toBlob((blob) => {
       const url = URL.createObjectURL(blob);
