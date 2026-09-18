@@ -1,9 +1,68 @@
 import React, { useState, useEffect } from 'react';
 import { X, ClipboardList, Eye } from 'lucide-react';
 import { DrivePdfViewer } from '../files/DrivePdfViewer.jsx';
+import { PageMarksOverlay } from '../files/PageMarks.jsx';
 import { formatTime } from '../shared/SmallUI.jsx';
 import { DESIGN_TASK_TYPE_LABEL } from '../../lib/constants.js';
 import { supabase } from '../../lib/supabaseClient.js';
+
+
+// ---- 排程表單裡「頁碼／每頁說明／每頁紅框」三份資料要一起維護 ----
+// 拿掉一頁時，那一頁的說明跟紅框要一起拿掉；在還沒加入的頁面上畫紅框，等於自動把
+// 那一頁加入（圈了就代表這頁要改）。紅框用頁碼字串當 key，跟 pageNotes 一致。
+
+export function toggleTaskPage(form, p) {
+  const key = String(p);
+  const has = form.pages.includes(p);
+  const pages = has ? form.pages.filter((x) => x !== p) : [...form.pages, p];
+  const pageNotes = { ...form.pageNotes };
+  const pageMarks = { ...(form.pageMarks || {}) };
+  if (has) { delete pageNotes[key]; delete pageMarks[key]; }
+  else if (!(key in pageNotes)) pageNotes[key] = '';
+  return { ...form, pages, pageNotes, pageMarks };
+}
+
+export function addTaskPageMark(form, p, rect) {
+  const base = form.pages.includes(p) ? form : toggleTaskPage(form, p);
+  const key = String(p);
+  const pageMarks = { ...(base.pageMarks || {}) };
+  pageMarks[key] = [...(pageMarks[key] || []), rect];
+  return { ...base, pageMarks };
+}
+
+export function removeTaskPageMark(form, p, index) {
+  const key = String(p);
+  const list = ((form.pageMarks || {})[key] || []).filter((_, i) => i !== index);
+  const pageMarks = { ...(form.pageMarks || {}) };
+  if (list.length) pageMarks[key] = list;
+  else delete pageMarks[key];
+  return { ...form, pageMarks };
+}
+
+// 送出前整理：只留下「有被選取的頁面」而且真的有紅框的，一個都沒有就回傳 null
+export function pickTaskPageMarks(pages, pageMarks) {
+  const out = {};
+  for (const p of pages || []) {
+    const list = (pageMarks || {})[String(p)];
+    if (Array.isArray(list) && list.length) out[String(p)] = list;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+// page_marks（紅框）欄位要先在 Supabase 執行 supabase/design_tasks_page_marks.sql 才會
+// 存在。還沒執行前，只要送出的資料帶著這個欄位，整筆都會被資料庫拒絕——所以偵測到
+// 是這個欄位的問題時，拿掉它重送一次：指派照常成功，只是紅框暫時存不進去。
+// send：實際送出的函式（insert 或 update），回傳 supabase 的 { error }。
+export async function saveDesignTaskWithMarksFallback(send, payload) {
+  let { error } = await send(payload);
+  let marksDropped = false;
+  if (error && /page_marks/.test(error.message || '')) {
+    const { page_marks: dropped, ...rest } = payload;
+    marksDropped = !!dropped;
+    ({ error } = await send(rest));
+  }
+  return { error, marksDropped };
+}
 
 
 // 指派任務給內部夥伴（admin 專用）
@@ -98,9 +157,28 @@ export function AssignTaskModal({ cubeOptions, internalUsers, onClose, onSubmit,
 
 
 // 設計師排程清單頁：admin 在這裡指派「要修改的內容／要製作的新講義」，設計師登入後只看到指派給自己的項目
-export function ScheduleView({ role, currentUserEmail, session, tasks, onOpenCreate, onEdit, onMarkDone, onDelete, resolveAuthorName }) {
+export function ScheduleView({ role, currentUserEmail, session, tasks, onOpenCreate, onEdit, onMarkDone, onUndoDone, onDelete, resolveAuthorName }) {
   const [filter, setFilter] = useState('pending');
   const [previewTask, setPreviewTask] = useState(null);
+  // 剛按下「標記完成」的那一項。清單預設停在「待處理」分頁，標記完成的項目會立刻從
+  // 畫面上消失——誤觸的話連要去哪裡改回來都不知道。所以按下去後在下方跳出一條可以
+  // 「復原」的提示，幾秒後自動收起；之後才發現按錯的，也可以到「已完成」分頁按復原。
+  const [lastDone, setLastDone] = useState(null);
+
+  useEffect(() => {
+    if (!lastDone) return undefined;
+    const timer = setTimeout(() => setLastDone(null), 10000);
+    return () => clearTimeout(timer);
+  }, [lastDone]);
+
+  const markDone = async (t) => {
+    const ok = await onMarkDone(t.id);
+    if (ok) setLastDone({ id: t.id, title: t.title });
+  };
+  const undoDone = async (id) => {
+    const ok = await onUndoDone(id);
+    if (ok) setLastDone((cur) => (cur && cur.id === id ? null : cur));
+  };
 
   const visibleTasks = role === 'designer' ? tasks.filter((t) => t.assigned_to === currentUserEmail) : tasks;
   const filtered = visibleTasks
@@ -180,10 +258,18 @@ export function ScheduleView({ role, currentUserEmail, session, tasks, onOpenCre
                 )}
                 {role === 'designer' && t.status !== 'done' && (
                   <button
-                    onClick={() => onMarkDone(t.id)}
+                    onClick={() => markDone(t)}
                     className="text-sm font-mono uppercase tracking-wider border border-[#00ff88] text-[var(--accentText)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:bg-[#00ff88] hover:text-[#0a0a0f] transition"
                   >
                     標記完成
+                  </button>
+                )}
+                {role === 'designer' && t.status === 'done' && (
+                  <button
+                    onClick={() => undoDone(t.id)}
+                    className="text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
+                  >
+                    復原為待處理
                   </button>
                 )}
                 {role === 'admin' && (
@@ -209,6 +295,21 @@ export function ScheduleView({ role, currentUserEmail, session, tasks, onOpenCre
       </div>
 
       {previewTask && <DesignTaskPreviewModal task={previewTask} session={session} onClose={() => setPreviewTask(null)} />}
+
+      {lastDone && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[210] max-w-[92vw] bg-[var(--card)] border-2 border-[#00ff88] cyber-chamfer-sm shadow-[0_0_20px_rgba(0,255,136,0.3)] px-4 py-3 flex items-center gap-3">
+          <span className="text-base text-[var(--fg)] truncate">已將「{lastDone.title}」標記完成</span>
+          <button
+            onClick={() => undoDone(lastDone.id)}
+            className="shrink-0 text-sm font-mono uppercase tracking-wider border-2 border-[#00ff88] text-[var(--accentText)] bg-transparent px-3 py-1 cyber-chamfer-sm hover:bg-[#00ff88] hover:text-[#0a0a0f] transition"
+          >
+            復原
+          </button>
+          <button onClick={() => setLastDone(null)} className="shrink-0 text-[var(--mutedFg)] hover:text-[var(--fg)]" title="關閉">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -221,6 +322,7 @@ export function DesignTaskPreviewModal({ task, session, onClose }) {
   const currentPage = pages[idx];
 
   const currentPageNote = task.page_notes ? task.page_notes[String(currentPage)] : null;
+  const currentPageMarks = (task.page_marks || {})[String(currentPage)] || [];
 
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-[300] p-4" onClick={onClose}>
@@ -242,7 +344,15 @@ export function DesignTaskPreviewModal({ task, session, onClose }) {
         <div className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden">
           <div className="flex-1 min-w-0 min-h-[320px] bg-black flex flex-col">
             <div className="flex-1 min-h-0">
-              <DrivePdfViewer category={task.file_category} recordId={task.file_id} pageNumber={currentPage} onNumPages={() => {}} session={session} fitHeight />
+              <DrivePdfViewer
+                category={task.file_category}
+                recordId={task.file_id}
+                pageNumber={currentPage}
+                onNumPages={() => {}}
+                session={session}
+                fitHeight
+                pageOverlay={<PageMarksOverlay marks={currentPageMarks} />}
+              />
             </div>
             {pages.length > 1 && (
               <div className="flex items-center justify-center gap-3 p-2 border-t border-[var(--border)] bg-[var(--card)] shrink-0">
@@ -274,6 +384,9 @@ export function DesignTaskPreviewModal({ task, session, onClose }) {
             <div className="border-2 border-[var(--cyanText)]/50 cyber-chamfer-sm p-3">
               <p className="text-sm font-mono uppercase tracking-wide text-[var(--cyanText)] mb-2">第 {currentPage} 頁的說明</p>
               <p className="text-base text-[var(--fg)] whitespace-pre-wrap break-words">{currentPageNote || '（這一頁沒有個別說明）'}</p>
+              {currentPageMarks.length > 0 && (
+                <p className="text-sm text-[#ff4d63] mt-2">左邊頁面上用紅框圈出了 {currentPageMarks.length} 處要修改的地方</p>
+              )}
             </div>
             {task.pages && task.pages.length > 0 && (
               <p className="text-sm text-[var(--mutedFg)]">指定頁碼：第 {[...task.pages].sort((a, b) => a - b).join('、')} 頁</p>
@@ -299,9 +412,10 @@ export function DesignTaskModal({ designers, cubeOptions, session, editingTask, 
     file_id: editingTask.file_id || '',
     pages: editingTask.pages || [],
     pageNotes: editingTask.page_notes || {},
+    pageMarks: editingTask.page_marks || {},
   } : {
     title: '', description: '', task_type: 'revise', assigned_to: designers[0] ? designers[0].email : '', due_date: '',
-    cube_name: '', file_category: '', file_id: '', pages: [], pageNotes: {},
+    cube_name: '', file_category: '', file_id: '', pages: [], pageNotes: {}, pageMarks: {},
   });
   const [submitting, setSubmitting] = useState(false);
   const [cubeFiles, setCubeFiles] = useState([]);
@@ -332,16 +446,8 @@ export function DesignTaskModal({ designers, cubeOptions, session, editingTask, 
   // 這裡統一轉成字串比較，避免「明明選了版本，頁碼區塊卻完全不顯示」的問題
   const selectedFile = cubeFiles.find((f) => f.category === form.file_category && String(f.id) === String(form.file_id)) || null;
 
-  const togglePage = (p) => {
-    setForm((f) => {
-      const has = f.pages.includes(p);
-      const pages = has ? f.pages.filter((x) => x !== p) : [...f.pages, p];
-      const pageNotes = { ...f.pageNotes };
-      if (has) delete pageNotes[String(p)];
-      else if (!(String(p) in pageNotes)) pageNotes[String(p)] = '';
-      return { ...f, pages, pageNotes };
-    });
-  };
+  const togglePage = (p) => setForm((f) => toggleTaskPage(f, p));
+  const currentMarks = (form.pageMarks || {})[String(previewPage)] || [];
 
   const submit = async () => {
     if (!form.title.trim() || !form.assigned_to) return;
@@ -382,7 +488,7 @@ export function DesignTaskModal({ designers, cubeOptions, session, editingTask, 
               <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">類型</label>
               <select
                 value={form.task_type}
-                onChange={(e) => setForm((f) => ({ ...f, task_type: e.target.value, cube_name: '', file_category: '', file_id: '', pages: [], pageNotes: {} }))}
+                onChange={(e) => setForm((f) => ({ ...f, task_type: e.target.value, cube_name: '', file_category: '', file_id: '', pages: [], pageNotes: {}, pageMarks: {} }))}
                 className="w-full bg-[var(--muted)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)]"
               >
                 <option value="revise">修改內容</option>
@@ -397,7 +503,7 @@ export function DesignTaskModal({ designers, cubeOptions, session, editingTask, 
                   <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">方塊</label>
                   <select
                     value={form.cube_name}
-                    onChange={(e) => setForm((f) => ({ ...f, cube_name: e.target.value, file_category: '', file_id: '', pages: [], pageNotes: {} }))}
+                    onChange={(e) => setForm((f) => ({ ...f, cube_name: e.target.value, file_category: '', file_id: '', pages: [], pageNotes: {}, pageMarks: {} }))}
                     className="w-full bg-[var(--card)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)]"
                   >
                     <option value="">請選擇方塊</option>
@@ -417,7 +523,7 @@ export function DesignTaskModal({ designers, cubeOptions, session, editingTask, 
                         value={form.file_category && form.file_id ? `${form.file_category}:${form.file_id}` : ''}
                         onChange={(e) => {
                           const [category, id] = e.target.value.split(':');
-                          setForm((f) => ({ ...f, file_category: category || '', file_id: id || '', pages: [], pageNotes: {} }));
+                          setForm((f) => ({ ...f, file_category: category || '', file_id: id || '', pages: [], pageNotes: {}, pageMarks: {} }));
                           setPreviewPage(1);
                         }}
                         className="w-full bg-[var(--card)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)]"
@@ -436,8 +542,24 @@ export function DesignTaskModal({ designers, cubeOptions, session, editingTask, 
                 {selectedFile && (
                   <div>
                     <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">頁碼（可複選，瀏覽後點「加入這一頁」）</label>
+                    <p className="text-sm text-[#ff4d63] mb-1.5">可以直接在頁面上按住拖曳，用紅框圈出要改的地方；圈了之後這一頁會自動加入。</p>
                     <div className="border border-[var(--border)] flex justify-center bg-black">
-                      <DrivePdfViewer category={selectedFile.category} recordId={selectedFile.id} pageNumber={previewPage} onNumPages={setNumPages} session={session} pageWidth={560} />
+                      <DrivePdfViewer
+                        category={selectedFile.category}
+                        recordId={selectedFile.id}
+                        pageNumber={previewPage}
+                        onNumPages={setNumPages}
+                        session={session}
+                        pageWidth={560}
+                        pageOverlay={(
+                          <PageMarksOverlay
+                            marks={currentMarks}
+                            editable
+                            onAdd={(rect) => setForm((f) => addTaskPageMark(f, previewPage, rect))}
+                            onRemove={(i) => setForm((f) => removeTaskPageMark(f, previewPage, i))}
+                          />
+                        )}
+                      />
                     </div>
                     {numPages > 0 && (
                       <>
@@ -468,6 +590,9 @@ export function DesignTaskModal({ designers, cubeOptions, session, editingTask, 
                         >
                           {form.pages.includes(previewPage) ? '✓ 已加入這一頁（點擊移除）' : '+ 加入這一頁'}
                         </button>
+                        {currentMarks.length > 0 && (
+                          <p className="text-sm text-[#ff4d63] mt-2">這一頁有 {currentMarks.length} 個紅框（點紅框右上角的 × 可以刪除）</p>
+                        )}
                         {form.pages.includes(previewPage) && (
                           <div className="mt-2">
                             <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">第 {previewPage} 頁的說明（選填，這一頁專屬的回饋）</label>
@@ -484,7 +609,7 @@ export function DesignTaskModal({ designers, cubeOptions, session, editingTask, 
                           <div className="flex flex-wrap gap-1.5 mt-2">
                             {[...form.pages].sort((a, b) => a - b).map((p) => (
                               <span key={p} className="flex items-center gap-1 text-sm font-mono border border-[#00ff88]/50 text-[var(--accentText)] px-2 py-0.5 cyber-chamfer-sm">
-                                第{p}頁
+                                第{p}頁{((form.pageMarks || {})[String(p)] || []).length > 0 ? `・${form.pageMarks[String(p)].length}框` : ''}
                                 <button onClick={() => togglePage(p)} className="hover:text-[var(--dangerText)]"><X className="w-3 h-3" /></button>
                               </span>
                             ))}

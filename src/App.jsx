@@ -15,7 +15,7 @@ import { ArticleBlock, InstructorHandout, SimpleFileBlock, VersionedFileBlock } 
 import { ReviewModal } from './components/files/ReviewModal.jsx';
 import { GrayscaleTool } from './components/grayscale/GrayscaleTool.jsx';
 import { CubeNavButton } from './components/learningMap/LearningMap.jsx';
-import { AssignTaskModal, DesignTaskModal, ScheduleView } from './components/schedule/ScheduleComponents.jsx';
+import { AssignTaskModal, DesignTaskModal, ScheduleView, pickTaskPageMarks, saveDesignTaskWithMarksFallback } from './components/schedule/ScheduleComponents.jsx';
 import { CubeBadges, LoadingScreen } from './components/shared/SmallUI.jsx';
 import { ADMIN_EMAIL, ALL_CUBES_FLAT, CATEGORY_COMMENT_COLUMN, CATEGORY_TABLE, CUBE_IMAGE_MAP, GENERAL_INSTRUCTOR_EMAILS, PROFILES_TABLE, ROLE_META, STAFF_EMAILS, TIERS, getCubeImageStorageFileName, getCubeImageUrl, normalizeEmail } from './lib/constants.js';
 import { STORAGE_BUCKET, fetchCubeImageVersions, supabase } from './lib/supabaseClient.js';
@@ -382,32 +382,49 @@ export default function App() {
       file_id: isRevise ? form.file_id || null : null,
       pages: isRevise && form.pages && form.pages.length > 0 ? form.pages : null,
       page_notes: isRevise && form.pageNotes && Object.keys(form.pageNotes).length > 0 ? form.pageNotes : null,
+      page_marks: isRevise ? pickTaskPageMarks(form.pages, form.pageMarks) : null,
     };
   };
 
+  const MARKS_NOT_SAVED = '，但紅框沒有存到：請先在 Supabase 執行 design_tasks_page_marks.sql';
+
   const createDesignTask = async (form) => {
-    const { error } = await supabase.from('design_tasks').insert({
-      ...buildDesignTaskPayload(form),
-      assigned_by: session.user.email,
-    });
+    const { error, marksDropped } = await saveDesignTaskWithMarksFallback(
+      (payload) => supabase.from('design_tasks').insert(payload),
+      { ...buildDesignTaskPayload(form), assigned_by: session.user.email },
+    );
     if (error) { console.error('[新增排程任務失敗]', error.message, error); showToast('新增失敗：' + error.message); return; }
-    showToast('已新增排程項目');
+    showToast(marksDropped ? '已新增排程項目' + MARKS_NOT_SAVED : '已新增排程項目');
     setDesignTaskModalTarget(null);
     fetchDesignTasks();
   };
 
   const updateDesignTask = async (taskId, form) => {
-    const { error } = await supabase.from('design_tasks').update(buildDesignTaskPayload(form)).eq('id', taskId);
+    const { error, marksDropped } = await saveDesignTaskWithMarksFallback(
+      (payload) => supabase.from('design_tasks').update(payload).eq('id', taskId),
+      buildDesignTaskPayload(form),
+    );
     if (error) { console.error('[更新排程任務失敗]', error.message, error); showToast('更新失敗：' + error.message); return; }
-    showToast('已更新排程項目');
+    showToast(marksDropped ? '已更新排程項目' + MARKS_NOT_SAVED : '已更新排程項目');
     setDesignTaskModalTarget(null);
     fetchDesignTasks();
   };
 
+  // 回傳成功與否，排程清單才知道要不要跳出「復原」提示
   const markDesignTaskDone = async (taskId) => {
     const { error } = await supabase.from('design_tasks').update({ status: 'done' }).eq('id', taskId);
-    if (error) { console.error('[更新排程任務狀態失敗]', error.message, error); showToast('更新失敗：' + error.message); return; }
+    if (error) { console.error('[更新排程任務狀態失敗]', error.message, error); showToast('更新失敗：' + error.message); return false; }
     fetchDesignTasks();
+    return true;
+  };
+
+  // 設計師誤按「標記完成」時復原。狀態只有 pending / done 兩種，復原就是改回 pending
+  const markDesignTaskPending = async (taskId) => {
+    const { error } = await supabase.from('design_tasks').update({ status: 'pending' }).eq('id', taskId);
+    if (error) { console.error('[復原排程任務狀態失敗]', error.message, error); showToast('復原失敗：' + error.message); return false; }
+    showToast('已復原為待處理');
+    fetchDesignTasks();
+    return true;
   };
 
   const deleteDesignTask = async (taskId) => {
@@ -967,6 +984,7 @@ export default function App() {
             onOpenCreate={() => { fetchAllProfiles(); setDesignTaskModalTarget('new'); }}
             onEdit={(t) => { fetchAllProfiles(); setDesignTaskModalTarget(t); }}
             onMarkDone={markDesignTaskDone}
+            onUndoDone={markDesignTaskPending}
             onDelete={deleteDesignTask}
             resolveAuthorName={resolveAuthorName}
           />

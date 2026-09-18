@@ -20,7 +20,10 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 export const drivePdfBlobCache = new Map();
 
 
-export function DrivePdfViewer({ category, recordId, watermark, pageNumber, onNumPages, session, pageWidth, fitHeight }) {
+// pageOverlay：要疊在頁面上的東西（例如紅框標記）。會放進 <Page> 裡當 children，
+// <Page> 本身是 position: relative、大小剛好等於渲染出來的頁面，所以疊上去的東西
+// 會跟頁面完全對齊，不管頁面是用固定寬度還是依高度縮放。
+export function DrivePdfViewer({ category, recordId, watermark, pageNumber, onNumPages, session, pageWidth, fitHeight, pageOverlay }) {
   const cacheKey = `${category}-${recordId}`;
   const [blobUrl, setBlobUrl] = useState(() => drivePdfBlobCache.get(cacheKey) || null);
   const [error, setError] = useState(null);
@@ -108,9 +111,9 @@ export function DrivePdfViewer({ category, recordId, watermark, pageNumber, onNu
           loading={<p className="text-[var(--mutedFg)] text-sm py-10">解析頁面中...</p>}
         >
           {fitHeight && containerHeight ? (
-            <Page pageNumber={pageNumber || 1} height={containerHeight - 8} renderTextLayer={false} renderAnnotationLayer={false} />
+            <Page pageNumber={pageNumber || 1} height={containerHeight - 8} renderTextLayer={false} renderAnnotationLayer={false}>{pageOverlay}</Page>
           ) : (
-            <Page pageNumber={pageNumber || 1} width={pageWidth || 720} renderTextLayer={false} renderAnnotationLayer={false} />
+            <Page pageNumber={pageNumber || 1} width={pageWidth || 720} renderTextLayer={false} renderAnnotationLayer={false}>{pageOverlay}</Page>
           )}
         </Document>
       )}
