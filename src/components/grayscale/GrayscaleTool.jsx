@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Loader2, Paintbrush, Download } from 'lucide-react';
+import { Loader2, Paintbrush, Pipette, Download } from 'lucide-react';
 
 
 // ============================================================================
@@ -55,30 +55,10 @@ export function grayBuildLabBuffer(data, n) {
 }
 
 
-// 固定種子的亂數產生器（mulberry32）。k-means++ 需要亂數挑起始點，以前用
-// Math.random，同一張照片每次上傳分析出來的色塊都不一樣（實測同一張斜轉照片，
-// 偵測到的色塊數在 38～85 之間跳動，有時整面貼紙沒被抓到）。改成固定種子後，
-// 同一張照片永遠得到同一個結果。
-function grayMakeRng(seed) {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6D2B79F5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-
 // k-means++ 初始化 + 標準 k-means 疊代，只在「抽樣」上跑（不管照片多大，樣本數
 // 固定在兩萬上下），找中心點的時間不會隨照片解析度暴增；找到中心點以後才拿去對
 // 「全部」像素做最近中心分類（見 grayAssignClusters），這樣既快又不會因為抽樣
 // 漏掉小面積的貼紙。
-// 光是固定種子只保證「每次一樣」，不保證「每次都好」——萬一那個種子剛好挑到很差的
-// 起始點，就會固定地差。所以從好幾組不同起始點各跑一次，留下分得最緊密的那組
-// （所有樣本到自己中心點的距離總和最小），這是 k-means 的標準做法。
-const GRAY_KMEANS_RESTARTS = 6;
-
 export function grayKMeansFit(lab, n, k, iterations) {
   const targetSamples = 20000;
   const step = Math.max(1, Math.floor(n / targetSamples));
@@ -90,18 +70,8 @@ export function grayKMeansFit(lab, n, k, iterations) {
     const src = idxList[i] * 3;
     sample[i * 3] = lab[src]; sample[i * 3 + 1] = lab[src + 1]; sample[i * 3 + 2] = lab[src + 2];
   }
-  const rng = grayMakeRng(0x9E3779B9);
-  let best = null, bestInertia = Infinity;
-  for (let run = 0; run < GRAY_KMEANS_RESTARTS; run++) {
-    const { centroids, inertia } = grayKMeansOnce(sample, ns, k, iterations, rng);
-    if (inertia < bestInertia) { bestInertia = inertia; best = centroids; }
-  }
-  return best;
-}
-
-function grayKMeansOnce(sample, ns, k, iterations, rng) {
   const centroids = new Float32Array(k * 3);
-  const first = Math.floor(rng() * ns);
+  const first = Math.floor(Math.random() * ns);
   centroids[0] = sample[first * 3]; centroids[1] = sample[first * 3 + 1]; centroids[2] = sample[first * 3 + 2];
   const distSq = new Float32Array(ns).fill(Infinity);
   for (let c = 1; c < k; c++) {
@@ -112,7 +82,7 @@ function grayKMeansOnce(sample, ns, k, iterations, rng) {
     }
     let total = 0; for (let i = 0; i < ns; i++) total += distSq[i];
     if (total <= 0) { centroids[c * 3] = sample[0]; centroids[c * 3 + 1] = sample[1]; centroids[c * 3 + 2] = sample[2]; continue; }
-    let r = rng() * total, acc = 0, chosen = ns - 1;
+    let r = Math.random() * total, acc = 0, chosen = ns - 1;
     for (let i = 0; i < ns; i++) { acc += distSq[i]; if (acc >= r) { chosen = i; break; } }
     centroids[c * 3] = sample[chosen * 3]; centroids[c * 3 + 1] = sample[chosen * 3 + 1]; centroids[c * 3 + 2] = sample[chosen * 3 + 2];
   }
@@ -137,17 +107,7 @@ function grayKMeansOnce(sample, ns, k, iterations, rng) {
       if (counts[c] > 0) { centroids[c * 3] = sums[c * 3] / counts[c]; centroids[c * 3 + 1] = sums[c * 3 + 1] / counts[c]; centroids[c * 3 + 2] = sums[c * 3 + 2] / counts[c]; }
     }
   }
-  let inertia = 0;
-  for (let i = 0; i < ns; i++) {
-    let bestD = Infinity;
-    for (let c = 0; c < k; c++) {
-      const dl = sample[i * 3] - centroids[c * 3], da = sample[i * 3 + 1] - centroids[c * 3 + 1], db = sample[i * 3 + 2] - centroids[c * 3 + 2];
-      const d = dl * dl + da * da + db * db;
-      if (d < bestD) bestD = d;
-    }
-    inertia += bestD;
-  }
-  return { centroids, inertia };
+  return centroids;
 }
 
 
@@ -309,38 +269,18 @@ export function grayComputeRegionMeanLum(data, resolved, protect, n, numLabels) 
 }
 
 
-// 「一鍵灰階」要灰掉哪些色塊：只挑真的是貼紙的。分割出來的色塊裡，有一些其實是
-// 黑框的碎片（被格線圍起來的一小塊塑膠），絕大部分像素都是中性的黑、受到保護，
-// 只剩零星幾個帶著反光顏色的像素沒被保護。一鍵灰階如果連這些碎片一起灰掉，那幾
-// 個像素會被拉到統一灰階的亮度，黑框上就會冒出一點一點的灰斑。
-// 判斷方式：比「可以被灰階的像素有多少」，而且是跟「這張照片裡一片典型貼紙」比。
-//   1. 超過一半的像素可灰階 → 貼紙。
-//   2. 就算不到一半，只要可灰階的像素量達到典型貼紙的 1/4 → 也是貼紙。這條是給
-//      「同一片色塊還連帶吃進一大塊陰影／黑框」的情況：實測斜轉照片上有兩片藍色
-//      貼紙只有 37%、44% 可灰階，卻各有 3 萬、1.9 萬個可灰階像素，用比例會被誤丟。
-// 黑框碎片可灰階的只有零星反光，實測最多約 700 個像素；真的貼紙最少也有六千多個，
-// 兩者差了將近十倍，用「典型貼紙的 1/4」當界線，兩邊都有很大的餘裕。
-// 「典型貼紙」取第 1 條那群的中位數，會跟著每張照片的方塊大小自動調整。
-export function grayPickStickerLabels(resolved, protect, n, numLabels) {
-  const total = new Float64Array(numLabels), open = new Float64Array(numLabels);
-  for (let i = 0; i < n; i++) {
-    const l = resolved[i];
-    if (!l) continue;
-    total[l]++;
-    if (!protect[i]) open[l]++;
+// 找一小塊區域裡出現最多次的值（眾數），給「點擊指定黑框位置」用：取一小塊區域
+// 而不是單一像素，避免剛好點到反光或邊緣噪點所在的那個群
+export function grayMode(arr) {
+  const counts = new Map();
+  let best = arr[0], bestCount = 0;
+  for (const v of arr) {
+    const c = (counts.get(v) || 0) + 1;
+    counts.set(v, c);
+    if (c > bestCount) { bestCount = c; best = v; }
   }
-  const mostlyOpen = [];
-  for (let l = 1; l < numLabels; l++) if (total[l] && open[l] / total[l] > 0.5) mostlyOpen.push(open[l]);
-  mostlyOpen.sort((a, b) => a - b);
-  const typical = mostlyOpen.length ? mostlyOpen[mostlyOpen.length >> 1] : n * 0.005;
-  const picked = [];
-  for (let l = 1; l < numLabels; l++) {
-    if (!total[l]) continue;
-    if (open[l] / total[l] > 0.5 || open[l] >= typical * 0.25) picked.push(l);
-  }
-  return picked;
+  return best;
 }
-
 
 
 // 移除孤立的雜訊黑塊／黑圈（反光高光周圍常見的暗暈邊、陰影黑點），只保留面積
@@ -501,18 +441,6 @@ export function grayBuildLineMaskFromClusters(clusterId, w, h, borderClusterId, 
 }
 
 
-// 透明背景的 PNG（去背的方塊照）：透明的地方百分之百不是貼紙，直接當成格線。
-// 以前完全不看透明度，透明處畫到 canvas 上只是一片純黑，如果分群時純黑背景剛好
-// 沒跟黑框分在同一群，背景就會變成一大塊「非格線」區域，靠著照片邊緣的貼紙會經
-// 由它連到照片邊界，整片被當成背景丟掉（實測斜轉照片有兩片角落貼紙因此完全抓不
-// 到，佔全部彩色像素的 9.3%；加上這條之後降到 0.1%）。
-export function grayMarkTransparentAsLine(data, n, rawLine, segLine) {
-  for (let i = 0; i < n; i++) {
-    if (data[i * 4 + 3] === 0) { rawLine[i] = 1; segLine[i] = 1; }
-  }
-}
-
-
 // 連通區塊分割（4方向flood fill），順便統計每塊的中心點座標，供匯出時把「原生
 // 解析度重新分割出的區塊」對應回使用者在預覽時點過的區塊。貼紙一定被格線/黑框
 // 完整包住、不會碰到照片最外緣；背景則幾乎一定會碰到照片邊界。所以除了面積篩選
@@ -624,9 +552,9 @@ export function GrayscaleTool() {
   const lastPaintPointRef = useRef(null);
   const stRef = useRef({
     img: null, natW: 0, natH: 0, workW: 0, workH: 0, workOriginal: null,
-    clusterId: null, centroids: null, k: 0, borderClusterId: -1,
-    protectMask: null, chromaThreshold: 0, darkThreshold: 101,
-    regionMeanLum: null, stickerLabels: null,
+    clusterId: null, centroids: null, k: 0, borderClusterId: -1, borderManual: false,
+    lineMaskRaw: null, blackOnlyMask: null, boundaryMask: null, protectMask: null, chromaThreshold: 0, darkThreshold: 101,
+    regionMeanLum: null,
     labelMask: null, resolvedLabelMask: null, keep: new Map(), manualOverride: null,
   });
   const st = stRef.current;
@@ -635,6 +563,7 @@ export function GrayscaleTool() {
   const [hasImage, setHasImage] = useState(false);
   const [regionCount, setRegionCount] = useState(0);
   const [statusMsg, setStatusMsg] = useState('請先上傳一張魔術方塊照片，系統會自動辨識這張照片實際的顏色與格線。');
+  const [showLineMask, setShowLineMask] = useState(false);
   // 金屬／鏡面方塊貼紙彼此顏色太接近，光靠顏色分群常常抓不出格線，局部反差偵測
   // 幾乎都有幫助、沒有明顯副作用，所以直接固定開啟，不用讓使用者自己選
   const auxDetectionMode = true;
@@ -643,6 +572,8 @@ export function GrayscaleTool() {
   const [brushMode, setBrushMode] = useState(false);
   const [brushForce, setBrushForce] = useState(1);
   const [brushRadius, setBrushRadius] = useState(14);
+  const [markingBorder, setMarkingBorder] = useState(false);
+  const [borderManualUI, setBorderManualUI] = useState(false);
   const [exporting, setExporting] = useState(false);
 
   const grayColor = {
@@ -670,6 +601,27 @@ export function GrayscaleTool() {
     return [tr + off, tg + off, tb + off];
   }
 
+  // 邊界標示遮罩：只標出「真正被判定為格線、且緊鄰某個偵測到的色塊」的像素，
+  // 用來畫細線提示；不會包含大片背景，避免整張圖被塗滿
+  function computeBoundaryMask() {
+    const w = st.workW, h = st.workH, n = w * h;
+    const lineRaw = st.lineMaskRaw, label = st.labelMask;
+    const boundary = new Uint8Array(n);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        if (!lineRaw[i]) continue;
+        let adj = false;
+        if (x > 0 && label[i - 1]) adj = true;
+        else if (x < w - 1 && label[i + 1]) adj = true;
+        else if (y > 0 && label[i - w]) adj = true;
+        else if (y < h - 1 && label[i + w]) adj = true;
+        boundary[i] = adj ? 1 : 0;
+      }
+    }
+    st.boundaryMask = boundary;
+  }
+
   // 即時預覽合成。最終的灰階遮罩就是：
   //     grayMask = 屬於使用者點的那顆貼紙  AND  NOT 中性像素（黑框／邊界保護）
   // 手動筆刷 override 優先權最高（使用者自己畫的範圍就照畫的來）。
@@ -684,6 +636,7 @@ export function GrayscaleTool() {
     const protect = st.protectMask;
     const label = st.resolvedLabelMask;
     const manual = st.manualOverride;
+    const boundary = st.boundaryMask;
     const meanLum = st.regionMeanLum;
     const amt = desatPct / 100;
     const { r: tr, g: tg, b: tb } = grayColor;
@@ -712,16 +665,25 @@ export function GrayscaleTool() {
         od[k] = orig[k]; od[k + 1] = orig[k + 1]; od[k + 2] = orig[k + 2];
       }
       od[k + 3] = 255;
+      if (showLineMask && boundary && boundary[i]) {
+        const a = 0.55;
+        od[k] = od[k] * (1 - a) + 0 * a;
+        od[k + 1] = od[k + 1] * (1 - a) + 229 * a;
+        od[k + 2] = od[k + 2] * (1 - a) + 255 * a;
+      }
     }
     ctx.putImageData(out, 0, 0);
   }
 
-  // 用分群結果建格線 → 分割出一片片貼紙。分群（k-means）只在上傳新照片時做一次。
+  // 用目前的 clusterId／borderClusterId（顏色群沒變，只有格線判斷可能因為輔助
+  // 偵測開關或手動指定黑框而變動）重跑一次「建格線 → 分割 → 侵蝕距離」，不重新
+  // 分群。分群（k-means）只在上傳新照片時做一次。
   function rebuildFromClusters() {
     const w = st.workW, h = st.workH;
     const edgeMask = auxDetectionMode ? grayBuildEdgeMask(st.workOriginal.data, w, h, GRAY_EDGE_THRESHOLD) : null;
-    const { rawLine, segLine } = grayBuildLineMaskFromClusters(st.clusterId, w, h, st.borderClusterId, edgeMask);
-    grayMarkTransparentAsLine(st.workOriginal.data, w * h, rawLine, segLine);
+    const { rawLine, segLine, blackOnly } = grayBuildLineMaskFromClusters(st.clusterId, w, h, st.borderClusterId, edgeMask);
+    st.lineMaskRaw = rawLine;
+    st.blackOnlyMask = blackOnly;
     // 邊界／黑框保護：用彩度判斷，不用幾何距離，所以跟解析度、黑框粗細無關。
     st.darkThreshold = grayAdaptiveDarkThreshold(st.centroids, st.k, st.borderClusterId, st.chromaThreshold);
     const protect = grayBuildChromaProtectMask(st.workOriginal.data, w * h, st.chromaThreshold, st.darkThreshold);
@@ -730,21 +692,13 @@ export function GrayscaleTool() {
     st.labelMask = seg.label;
     st.resolvedLabelMask = grayResolveUnknownLabels(rawLine, protect, seg.label, w, h);
     st.regionMeanLum = grayComputeRegionMeanLum(st.workOriginal.data, st.resolvedLabelMask, protect, w * h, seg.numLabels);
-    st.stickerLabels = grayPickStickerLabels(st.resolvedLabelMask, protect, w * h, seg.numLabels);
     st.keep = new Map();
+    computeBoundaryMask();
     setRegionCount(seg.count);
     setStatusMsg(seg.count > 0
-      ? `已自動辨識到 ${seg.count} 個色塊。直接點擊照片上想降低彩度的格子即可，再點一次可還原；也可以用「一鍵灰階」一次灰掉全部。`
-      : '沒有辨識到任何色塊，可以改用手動筆刷直接塗。');
+      ? `已自動辨識到 ${seg.count} 個色塊。直接點擊照片上想降低彩度的格子即可，再點一次可還原。`
+      : '沒有辨識到任何色塊，可以改用手動筆刷直接塗，或確認左下角的黑框標示是否正確。');
     renderPreview();
-  }
-
-  // 一鍵灰階：只灰掉判定為貼紙的色塊（見 grayPickStickerLabels），黑框碎片不動
-  function grayAllStickers() {
-    if (!st.stickerLabels) return;
-    for (const l of st.stickerLabels) st.keep.set(l, false);
-    renderPreview();
-    setStatusMsg(`已將 ${st.stickerLabels.length} 片貼紙全部灰階。點擊個別貼紙可以單獨還原那一片。`);
   }
 
   // 對照片做一次完整分析：找出這張照片實際的調色盤（k-means）→ 猜哪一群是黑框
@@ -756,6 +710,8 @@ export function GrayscaleTool() {
     // 彩度門檻跟調色盤一樣，只在上傳新照片時算一次，匯出時重用同一個值，
     // 確保預覽跟匯出的保護範圍完全一致
     st.chromaThreshold = grayAdaptiveChromaThreshold(centroids, k);
+    st.borderManual = false;
+    setBorderManualUI(false);
     st.borderClusterId = grayIdentifyBorderCluster(centroids, k, clusterId, n);
     rebuildFromClusters();
   }
@@ -808,6 +764,33 @@ export function GrayscaleTool() {
     return { x, y };
   }
 
+  // 手動指定黑框：取點擊位置周圍一小塊區域裡「出現最多次的顏色群」，不是單一
+  // 像素，避免踩到反光或邊緣噪點。顏色分群本身不用重跑，只是換一下「哪一群算
+  // 黑框」的認定。
+  function sampleBorderAt(cx, cy) {
+    const w = st.workW, h = st.workH;
+    const radius = 4;
+    const ids = [];
+    for (let dy = -radius; dy <= radius; dy++) {
+      const yy = cy + dy; if (yy < 0 || yy >= h) continue;
+      for (let dx = -radius; dx <= radius; dx++) {
+        const xx = cx + dx; if (xx < 0 || xx >= w) continue;
+        ids.push(st.clusterId[yy * w + xx]);
+      }
+    }
+    st.borderClusterId = grayMode(ids);
+    st.borderManual = true;
+    setBorderManualUI(true);
+    setMarkingBorder(false);
+    rebuildFromClusters();
+  }
+  function handleResetBorder() {
+    st.borderManual = false;
+    setBorderManualUI(false);
+    st.borderClusterId = grayIdentifyBorderCluster(st.centroids, st.k, st.clusterId, st.workW * st.workH);
+    rebuildFromClusters();
+  }
+
   function stampBrush(cx, cy) {
     const w = st.workW, h = st.workH;
     const r = brushRadius, r2 = r * r;
@@ -833,6 +816,8 @@ export function GrayscaleTool() {
     if (!hasImage) return;
     const { x, y } = getCanvasPixel(e);
     if (x < 0 || y < 0 || x >= st.workW || y >= st.workH) return;
+
+    if (markingBorder) { sampleBorderAt(x, y); return; }
 
     if (brushMode) {
       paintingRef.current = true;
@@ -863,7 +848,7 @@ export function GrayscaleTool() {
   }
   function handlePointerUp() { paintingRef.current = false; lastPaintPointRef.current = null; }
 
-  useEffect(() => { if (hasImage) renderPreview(); }, [desatPct, grayColorHex]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (hasImage) renderPreview(); }, [desatPct, grayColorHex, showLineMask]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 把預覽解析度的手動筆刷遮罩，用最近鄰放大成原生解析度。筆刷只是使用者畫的
   // 一塊遮罩，不是語意分割結果，直接照座標比例放大取樣即可
@@ -905,7 +890,6 @@ export function GrayscaleTool() {
     const nativeClusterId = grayAssignWithCentroids(orig, n, st.centroids, st.k);
     const edgeMask = auxDetectionMode ? grayBuildEdgeMask(orig, natW, natH, GRAY_EDGE_THRESHOLD) : null;
     const { rawLine: isLineNative, segLine } = grayBuildLineMaskFromClusters(nativeClusterId, natW, natH, st.borderClusterId, edgeMask);
-    grayMarkTransparentAsLine(orig, n, isLineNative, segLine);
     const seg = grayFloodFillLabel(segLine, natW, natH, GRAY_MIN_AREA_FRAC, GRAY_MAX_AREA_FRAC);
     // 保護遮罩用跟預覽同一個彩度門檻，在原生解析度上重算一次。因為判斷依據是
     // 「這個像素有沒有彩度」而不是「離格線幾個 pixel」，換解析度不會讓保護範圍
@@ -1000,7 +984,7 @@ export function GrayscaleTool() {
               ref={canvasRef}
               width={10}
               height={10}
-              className={`max-w-full h-auto ${hasImage ? '' : 'hidden'} ${brushMode ? 'cursor-crosshair' : 'cursor-pointer'}`}
+              className={`max-w-full h-auto ${hasImage ? '' : 'hidden'} ${brushMode ? 'cursor-crosshair' : markingBorder ? 'cursor-copy' : 'cursor-pointer'}`}
               onPointerDown={handlePointerDown}
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
@@ -1028,7 +1012,42 @@ export function GrayscaleTool() {
           </div>
 
           <div className="bg-[var(--card)] border border-[var(--border)] cyber-chamfer p-4">
-            <h3 className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-2">02 · 降低彩度</h3>
+            <h3 className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-2">02 · 格線辨識</h3>
+            <p className="text-sm text-[var(--mutedFg)] mb-2">系統會自動分析這張照片實際拍到的顏色來分組、找出格線，不用手動校色。</p>
+            <label className="flex items-center gap-2 text-sm text-[var(--fg)] cursor-pointer">
+              <input type="checkbox" checked={showLineMask} onChange={(e) => setShowLineMask(e.target.checked)} />
+              用細線標示目前辨識到的格線位置
+            </label>
+          </div>
+
+          <div className="bg-[var(--card)] border border-[var(--border)] cyber-chamfer p-4">
+            <h3 className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-2 flex items-center gap-1.5">
+              <Pipette className="w-3.5 h-3.5" /> 03 · 黑框標示（選填）
+            </h3>
+            <p className="text-sm text-[var(--mutedFg)] mb-3">系統會自動判斷哪一群顏色是黑色框線；如果猜錯（例如誤判成深色貼紙，或反過來沒找到黑框），點下面按鈕、再點照片上真正的黑框位置即可修正。</p>
+            <button
+              onClick={() => setMarkingBorder((prev) => !prev)}
+              className={`w-full text-sm font-mono uppercase tracking-wider px-3 py-1.5 cyber-chamfer-sm border-2 transition ${
+                markingBorder ? 'border-[#ffee00] text-[var(--yellowText)] shadow-[0_0_8px_#ffee0080]' : 'border-[var(--border)] text-[var(--fg)] hover:border-[#00ff88] hover:text-[var(--accentText)]'
+              }`}
+            >
+              {markingBorder ? '請點擊照片上的黑框位置…' : '指定黑框位置'}
+            </button>
+            <p className="text-sm text-[var(--mutedFg)] mt-2">
+              {borderManualUI ? '目前使用你手動指定的黑框。' : '目前使用系統自動判斷的黑框。'}
+            </p>
+            {borderManualUI && (
+              <button
+                onClick={handleResetBorder}
+                className="w-full mt-2 text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
+              >
+                改回自動判斷
+              </button>
+            )}
+          </div>
+
+          <div className="bg-[var(--card)] border border-[var(--border)] cyber-chamfer p-4">
+            <h3 className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-2">04 · 降低彩度</h3>
             <div className="flex items-center gap-2 mb-3">
               <label className="text-sm text-[var(--mutedFg)]">統一灰階顏色</label>
               <input type="color" value={grayColorHex} onChange={(e) => setGrayColorHex(e.target.value)} className="w-9 h-7 border border-[var(--border)] bg-transparent cursor-pointer" />
@@ -1038,27 +1057,17 @@ export function GrayscaleTool() {
               <span className="text-sm font-mono text-[var(--accentText)]">{desatPct}%</span>
             </div>
             <input type="range" min="0" max="100" value={desatPct} onChange={(e) => setDesatPct(parseInt(e.target.value))} className="w-full accent-[#00ff88]" />
-            <div className="grid grid-cols-2 gap-2 mt-3">
-              <button
-                onClick={grayAllStickers}
-                disabled={!hasImage}
-                className="text-sm font-mono uppercase tracking-wider border-2 border-[#00ff88] text-[var(--accentText)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:bg-[#00ff88] hover:text-[#0a0a0f] transition disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                一鍵灰階
-              </button>
-              <button
-                onClick={() => { st.keep = new Map(); renderPreview(); }}
-                disabled={!hasImage}
-                className="text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                全部還原成原圖
-              </button>
-            </div>
+            <button
+              onClick={() => { st.keep = new Map(); renderPreview(); }}
+              className="w-full mt-3 text-sm font-mono uppercase tracking-wider border border-[var(--border)] text-[var(--fg)] bg-transparent px-3 py-1.5 cyber-chamfer-sm hover:border-[#00ff88] hover:text-[var(--accentText)] transition"
+            >
+              全部還原成原圖
+            </button>
           </div>
 
           <div className="bg-[var(--card)] border border-[var(--border)] cyber-chamfer p-4">
             <h3 className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-2 flex items-center gap-1.5">
-              <Paintbrush className="w-3.5 h-3.5" /> 03 · 手動筆刷修正
+              <Paintbrush className="w-3.5 h-3.5" /> 05 · 手動筆刷修正
             </h3>
             <label className="flex items-center gap-2 text-sm text-[var(--fg)] cursor-pointer mb-3">
               <input type="checkbox" checked={brushMode} onChange={(e) => setBrushMode(e.target.checked)} />
@@ -1105,7 +1114,7 @@ export function GrayscaleTool() {
             className="w-full flex items-center justify-center gap-1.5 border-2 border-[#00ff88] text-[var(--accentText)] bg-transparent text-base font-mono uppercase tracking-wider px-4 py-3 cyber-chamfer hover:bg-[#00ff88] hover:text-[#0a0a0f] transition disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
-            04 · 下載處理後圖片
+            06 · 下載處理後圖片
           </button>
         </div>
       </div>
