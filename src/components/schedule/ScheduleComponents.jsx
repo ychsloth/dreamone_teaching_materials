@@ -65,13 +65,41 @@ export async function saveDesignTaskWithMarksFallback(send, payload) {
 }
 
 
+// 指派視窗可以一次勾好幾個人，但 tasks 表一筆只放一個 assigned_to——勾幾個人就攤成幾筆，
+// 每個人各自有獨立的完成狀態，通知與清單那邊的既有邏輯完全不用動。
+// 舊資料／舊呼叫端可能傳單一字串進來，這裡一併接受，避免只改一邊就壞掉。
+export function buildAssignTaskRows(form, assignedBy) {
+  const assignees = Array.isArray(form.assigned_to) ? form.assigned_to : [form.assigned_to];
+  const unique = [...new Set(assignees.filter((e) => e && e.trim()))];
+  return unique.map((email) => ({
+    cube_name: form.cube_name,
+    category: form.category,
+    version_label: form.version_label || null,
+    assigned_to: email,
+    assigned_by: assignedBy,
+    due_date: form.due_date || null,
+    note: form.note || null,
+  }));
+}
+
+
 // 指派任務給內部夥伴（admin 專用）
 export function AssignTaskModal({ cubeOptions, internalUsers, onClose, onSubmit, resolveAuthorName }) {
-  const [form, setForm] = useState({ cube_name: cubeOptions[0] || '', category: 'draft', version_label: '', assigned_to: internalUsers[0] ? internalUsers[0].email : '', due_date: '', note: '' });
+  // assigned_to 是「一份校稿要同時交給哪幾個人」，所以存成 email 陣列。預設一個都不勾：
+  // 舊版預設勾第一個人，改成可複選之後若還保留這個預設，很容易在沒注意的情況下
+  // 把任務指派給名單上第一個人。
+  const [form, setForm] = useState({ cube_name: cubeOptions[0] || '', category: 'draft', version_label: '', assigned_to: [], due_date: '', note: '' });
   const [submitting, setSubmitting] = useState(false);
 
+  const toggleAssignee = (email) => setForm((f) => ({
+    ...f,
+    assigned_to: f.assigned_to.includes(email) ? f.assigned_to.filter((e) => e !== email) : [...f.assigned_to, email],
+  }));
+
+  const allSelected = internalUsers.length > 0 && form.assigned_to.length === internalUsers.length;
+
   const submit = async () => {
-    if (!form.cube_name || !form.assigned_to) return;
+    if (!form.cube_name || form.assigned_to.length === 0) return;
     setSubmitting(true);
     await onSubmit(form);
     setSubmitting(false);
@@ -117,14 +145,33 @@ export function AssignTaskModal({ cubeOptions, internalUsers, onClose, onSubmit,
             className="w-full bg-[var(--muted)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)]"
           />
           <div>
-            <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">指派給</label>
-            <select
-              value={form.assigned_to}
-              onChange={(e) => setForm((f) => ({ ...f, assigned_to: e.target.value }))}
-              className="w-full bg-[var(--muted)] border border-[var(--border)] cyber-chamfer-sm px-3 py-2 text-base text-[var(--fg)]"
-            >
-              {internalUsers.map((u) => <option key={u.email} value={u.email}>{resolveAuthorName(u.email)}（{u.email}）</option>)}
-            </select>
+            <div className="flex items-end justify-between mb-1 gap-2">
+              <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] block">
+                指派給（可複選{form.assigned_to.length > 0 ? `，已選 ${form.assigned_to.length} 人` : ''}）
+              </label>
+              <button
+                type="button"
+                onClick={() => setForm((f) => ({ ...f, assigned_to: allSelected ? [] : internalUsers.map((u) => u.email) }))}
+                className="text-sm font-mono text-[var(--mutedFg)] hover:text-[var(--accentText)] transition shrink-0"
+              >
+                {allSelected ? '全部取消' : '全選'}
+              </button>
+            </div>
+            <div className="bg-[var(--muted)] border border-[var(--border)] cyber-chamfer-sm max-h-44 overflow-y-auto divide-y divide-[var(--border)]">
+              {internalUsers.length === 0 ? (
+                <p className="px-3 py-2 text-sm text-[var(--mutedFg)]">目前沒有可以指派的內部夥伴</p>
+              ) : internalUsers.map((u) => (
+                <label key={u.email} className="flex items-center gap-2 px-3 py-2 text-base text-[var(--fg)] cursor-pointer hover:text-[var(--accentText)] transition">
+                  <input
+                    type="checkbox"
+                    checked={form.assigned_to.includes(u.email)}
+                    onChange={() => toggleAssignee(u.email)}
+                    className="shrink-0"
+                  />
+                  <span className="truncate">{resolveAuthorName(u.email)}（{u.email}）</span>
+                </label>
+              ))}
+            </div>
           </div>
           <div>
             <label className="text-sm font-mono uppercase tracking-wide text-[var(--mutedFg)] mb-1 block">校稿期限</label>
@@ -144,10 +191,10 @@ export function AssignTaskModal({ cubeOptions, internalUsers, onClose, onSubmit,
           />
           <button
             onClick={submit}
-            disabled={submitting || !form.cube_name || !form.assigned_to}
+            disabled={submitting || !form.cube_name || form.assigned_to.length === 0}
             className="w-full border-2 border-[#00ff88] text-[var(--accentText)] bg-transparent cyber-chamfer-sm font-mono uppercase tracking-wider py-2.5 disabled:opacity-40 hover:bg-[#00ff88] hover:text-[#0a0a0f] transition"
           >
-            {submitting ? '指派中...' : '送出指派'}
+            {submitting ? '指派中...' : form.assigned_to.length > 1 ? `送出指派（${form.assigned_to.length} 人）` : '送出指派'}
           </button>
         </div>
       </div>

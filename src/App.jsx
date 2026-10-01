@@ -15,7 +15,7 @@ import { ArticleBlock, InstructorHandout, SimpleFileBlock, VersionedFileBlock } 
 import { ReviewModal } from './components/files/ReviewModal.jsx';
 import { GrayscaleTool } from './components/grayscale/GrayscaleTool.jsx';
 import { CubeNavButton } from './components/learningMap/LearningMap.jsx';
-import { AssignTaskModal, DesignTaskModal, ScheduleView, pickTaskPageMarks, saveDesignTaskWithMarksFallback } from './components/schedule/ScheduleComponents.jsx';
+import { AssignTaskModal, DesignTaskModal, ScheduleView, buildAssignTaskRows, pickTaskPageMarks, saveDesignTaskWithMarksFallback } from './components/schedule/ScheduleComponents.jsx';
 import { CubeBadges, LoadingScreen } from './components/shared/SmallUI.jsx';
 import { ADMIN_EMAIL, ALL_CUBES_FLAT, CATEGORY_COMMENT_COLUMN, CATEGORY_TABLE, CUBE_IMAGE_MAP, GENERAL_INSTRUCTOR_EMAILS, PROFILES_TABLE, ROLE_META, STAFF_EMAILS, TIERS, getCubeImageStorageFileName, getCubeImageUrl, normalizeEmail } from './lib/constants.js';
 import { STORAGE_BUCKET, fetchCubeImageVersions, supabase } from './lib/supabaseClient.js';
@@ -341,17 +341,11 @@ export default function App() {
   };
 
   const assignTask = async (form) => {
-    const { error } = await supabase.from('tasks').insert({
-      cube_name: form.cube_name,
-      category: form.category,
-      version_label: form.version_label || null,
-      assigned_to: form.assigned_to,
-      assigned_by: session.user.email,
-      due_date: form.due_date || null,
-      note: form.note || null,
-    });
+    const rows = buildAssignTaskRows(form, session.user.email);
+    if (rows.length === 0) { showToast('請至少勾選一位指派對象'); return; }
+    const { error } = await supabase.from('tasks').insert(rows);
     if (error) { console.error('[指派任務失敗]', error.message, error); showToast('指派失敗：' + error.message); return; }
-    showToast('已指派任務');
+    showToast(rows.length > 1 ? `已指派任務給 ${rows.length} 位夥伴` : '已指派任務');
     setShowAssignModal(false);
     fetchTasks();
   };
